@@ -1,0 +1,22 @@
+services:
+  ondemandportforward:
+    build: .
+    image: ondemandportforward:latest
+    env_file: .env
+    environment:
+      DATA_DIR: /data
+      # -R forwards must reach the HOST machine, not the container itself:
+      INTERNAL_HOST: host.docker.internal
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    volumes:
+      - ondemandportforward_data:/data
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "ondemandportforward", "health"]
+      interval: 5m
+      timeout: 10s
+      retries: 2
+
+volumes:
+  ondemandportforward_data:
