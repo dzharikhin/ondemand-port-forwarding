@@ -22,6 +22,6 @@ def cfg(tmp_path) -> Config:
 
 @pytest.fixture
 def store(cfg) -> Store:
-    s = Store(cfg.db_path)
+    s = Store(cfg.data_dir)
     yield s
     s.close()

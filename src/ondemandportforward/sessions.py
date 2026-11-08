@@ -21,10 +21,10 @@ STATUS_DIED = "died"
 
 ERROR_LOG_LINES = 40
 
-CommandFactory = Callable[[Command, str], tuple[list[str], dict[str, str]]]
+CommandFactory = Callable[[Command], tuple[list[str], dict[str, str]]]
 
 
-def default_command_factory(cmd: Command, internal_host: str) -> tuple[list[str], dict[str, str]]:
+def default_command_factory(cmd: Command) -> tuple[list[str], dict[str, str]]:
     argv = ["sshpass", "-e", "ssh", "-N"]
     argv += ["-p", str(cmd.port)]
     argv += [
@@ -38,7 +38,7 @@ def default_command_factory(cmd: Command, internal_host: str) -> tuple[list[str]
         "ServerAliveCountMax=3",
     ]
     for remote, local in cmd.forwards:
-        argv += ["-R", f"{remote}:{internal_host}:{local}"]
+        argv += ["-R", f"{remote}:localhost:{local}"]
     argv += [f"{cmd.ssh_user}@{cmd.host}"]
     env = {"SSHPASS": cmd.ssh_password}
     return argv, env
@@ -98,7 +98,7 @@ class SessionManager:
 
         while attempts_left > 0 and time.monotonic() < deadline:
             attempts_left -= 1
-            argv, extra_env = self.command_factory(cmd, self.cfg.internal_host)
+            argv, extra_env = self.command_factory(cmd)
             self.store.add_session_event(session.id, "start", " ".join(argv))
             try:
                 proc = await asyncio.create_subprocess_exec(

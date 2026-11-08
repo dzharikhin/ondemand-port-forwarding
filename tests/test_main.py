@@ -26,10 +26,10 @@ class FakeNotifier:
 
 @pytest.fixture
 def harness(cfg, tmp_path):
-    store = Store(tmp_path / "t.db")
+    store = Store(str(tmp_path / "data"))
     validator = Validator(cfg, store)
     manager = SessionManager(
-        cfg, store, command_factory=lambda cmd, host: (ALIVE, {"SSHPASS": cmd.ssh_password})
+        cfg, store, command_factory=lambda cmd: (ALIVE, {"SSHPASS": cmd.ssh_password})
     )
     notifier = FakeNotifier()
     handler = make_handler(cfg, store, validator, manager, notifier)

@@ -22,7 +22,7 @@ DEAD = [
 
 def make_manager(cfg, store, argv_list) -> SessionManager:
     return SessionManager(
-        cfg, store, command_factory=lambda cmd, host: (argv_list, {"SSHPASS": cmd.ssh_password})
+        cfg, store, command_factory=lambda cmd: (argv_list, {"SSHPASS": cmd.ssh_password})
     )
 
 
@@ -56,7 +56,7 @@ async def test_fast_fail_retries_then_failed(cfg, store):
 async def test_retry_after_fail_succeeds(cfg, store):
     attempts = {"n": 0}
 
-    def factory(cmd, host):
+    def factory(cmd):
         attempts["n"] += 1
         return (DEAD if attempts["n"] == 1 else ALIVE, {})
 

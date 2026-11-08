@@ -14,7 +14,7 @@ from .store import Store
 
 def _store_for_tools() -> Store:
     data_dir = os.environ.get("DATA_DIR", "./data").strip() or "./data"
-    return Store(os.path.join(data_dir, "ondemandportforward.db"))
+    return Store(data_dir)
 
 
 def cmd_encrypt(args: argparse.Namespace) -> int:

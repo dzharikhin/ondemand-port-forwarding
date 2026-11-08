@@ -31,17 +31,12 @@ class Config:
     poll_interval: int = 60
     connect_grace: int = 10
     data_dir: str = "./data"
-    internal_host: str = "localhost"
 
     def __post_init__(self) -> None:
         self.smtp_user = self.smtp_user or self.imap_user
         self.smtp_password = self.smtp_password or self.imap_password
         self.mail_from = self.mail_from or self.smtp_user
         self.imap_user_lower = self.imap_user.strip().lower()
-
-    @property
-    def db_path(self) -> str:
-        return os.path.join(self.data_dir, "ondemandportforward.db")
 
     @classmethod
     def from_env(cls, env: dict[str, str] | None = None) -> Config:
@@ -83,7 +78,6 @@ class Config:
             poll_interval=opt_int("POLL_INTERVAL", 60),
             connect_grace=opt_int("CONNECT_GRACE", 10),
             data_dir=e.get("DATA_DIR", "./data").strip() or "./data",
-            internal_host=e.get("INTERNAL_HOST", "localhost").strip() or "localhost",
         )
 
 

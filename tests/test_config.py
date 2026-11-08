@@ -20,7 +20,7 @@ def test_defaults():
     assert cfg.ttl_default == 1800 and cfg.retries == 3
     assert cfg.plaintext_code == ""
     assert cfg.imap_user_lower == "me@example.com"
-    assert cfg.db_path.endswith("ondemandportforward.db")
+    assert cfg.data_dir == "./data"
 
 
 def test_bad_int():

@@ -1,60 +1,20 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import os
-import sqlite3
+import sys
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
-SCHEMA = """
-CREATE TABLE IF NOT EXISTS plaintext_code (
-    hash    TEXT PRIMARY KEY,
-    set_at  TEXT NOT NULL,
-    used_at TEXT
-);
-CREATE TABLE IF NOT EXISTS processed_emails (
-    uid     TEXT PRIMARY KEY,
-    seen_at TEXT NOT NULL
-);
-CREATE TABLE IF NOT EXISTS replay_cache (
-    body_hash TEXT PRIMARY KEY,
-    seen_at   TEXT NOT NULL
-);
-CREATE TABLE IF NOT EXISTS sessions (
-    id         TEXT PRIMARY KEY,
-    host       TEXT NOT NULL,
-    port       INTEGER NOT NULL,
-    ssh_user   TEXT NOT NULL,
-    forwards   TEXT NOT NULL,
-    ttl        INTEGER NOT NULL,
-    status     TEXT NOT NULL,
-    started_at TEXT NOT NULL,
-    ended_at   TEXT
-);
-CREATE TABLE IF NOT EXISTS attempts (
-    id         INTEGER PRIMARY KEY AUTOINCREMENT,
-    ts         TEXT NOT NULL,
-    imap_uid   TEXT,
-    sender     TEXT,
-    mode       TEXT NOT NULL,
-    outcome    TEXT NOT NULL,
-    reason     TEXT,
-    session_id TEXT
-);
-CREATE TABLE IF NOT EXISTS session_events (
-    id         INTEGER PRIMARY KEY AUTOINCREMENT,
-    session_id TEXT NOT NULL,
-    ts         TEXT NOT NULL,
-    event      TEXT NOT NULL,
-    detail     TEXT
-);
-CREATE TABLE IF NOT EXISTS meta (
-    key   TEXT PRIMARY KEY,
-    value TEXT NOT NULL
-);
-CREATE INDEX IF NOT EXISTS idx_attempts_ts ON attempts(ts);
-CREATE INDEX IF NOT EXISTS idx_events_session ON session_events(session_id);
-"""
+IMAP_FILE = "imap.json"  # mailbox watermark: meta (last_uid) + seen_uids
+REPLAY_FILE = "replay.json"  # ciphertext replay cache: {body_hash: seen_at}
+CODE_FILE = "code.json"  # one-time password usage state
+SESSIONS_FILE = "sessions.jsonl"  # session lifecycle events (append-only)
+ATTEMPTS_FILE = "attempts.jsonl"  # audit of every email attempt (append-only)
+
+MAX_SEEN_UIDS = 1000
+MAX_REPLAY_ENTRIES = 50_000
 
 
 def hash_code(code: str) -> str:
@@ -70,83 +30,148 @@ def _now() -> str:
 
 
 class Store:
-    def __init__(self, path: str) -> None:
-        os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
-        self._db = sqlite3.connect(path)
-        self._db.row_factory = sqlite3.Row
-        self._db.executescript(SCHEMA)
-        self._db.commit()
+    """Plain-file state: one JSON per logical state + append-only JSONL logs.
+
+    All files live in ``data_dir`` and are readable outside the container.
+    JSON state files are rewritten atomically (tmp + rename) on every change.
+    """
+
+    def __init__(self, data_dir: str) -> None:
+        self.data_dir = data_dir
+        os.makedirs(data_dir, exist_ok=True)
+        self._imap: dict[str, Any] = self._load_json(IMAP_FILE, {"meta": {}, "seen_uids": {}})
+        self._replay: dict[str, str] = self._load_json(REPLAY_FILE, {})
+        self._code: dict[str, Any] = self._load_json(CODE_FILE, {"armed": None, "used": []})
+
+    # -- plumbing -------------------------------------------------------------
+
+    def _path(self, name: str) -> str:
+        return os.path.join(self.data_dir, name)
+
+    def _load_json(self, name: str, default: Any) -> Any:
+        path = self._path(name)
+        if not os.path.exists(path):
+            return default
+        try:
+            with open(path, encoding="utf-8") as f:
+                return json.load(f)
+        except (json.JSONDecodeError, OSError) as e:
+            backup = f"{path}.corrupt-{datetime.now(UTC).strftime('%Y%m%d%H%M%S')}"
+            os.replace(path, backup)
+            print(
+                f"WARNING: corrupt state file {path} ({e}); moved to {backup}",
+                file=sys.stderr,
+            )
+            return default
+
+    def _save_json(self, name: str, data: Any) -> None:
+        path = self._path(name)
+        tmp = f"{path}.tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False, indent=1)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp, path)
+
+    @staticmethod
+    def _append_jsonl(path: str, obj: dict[str, Any]) -> None:
+        with open(path, "a", encoding="utf-8") as f:
+            f.write(json.dumps(obj, ensure_ascii=False) + "\n")
+
+    def _read_jsonl(self, name: str) -> list[dict[str, Any]]:
+        path = self._path(name)
+        if not os.path.exists(path):
+            return []
+        rows: list[dict[str, Any]] = []
+        with open(path, encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    rows.append(json.loads(line))
+                except json.JSONDecodeError:
+                    continue  # tolerate a torn trailing line
+        return rows
+
+    def _rewrite_jsonl(self, name: str, rows: list[dict[str, Any]]) -> None:
+        path = self._path(name)
+        tmp = f"{path}.tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            for row in rows:
+                f.write(json.dumps(row, ensure_ascii=False) + "\n")
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp, path)
 
     def close(self) -> None:
-        self._db.close()
+        pass  # kept for API compatibility
 
-    # -- processed emails -------------------------------------------------
+    # -- mailbox watermark ----------------------------------------------------
 
     def email_seen(self, uid: str) -> bool:
-        cur = self._db.execute("SELECT 1 FROM processed_emails WHERE uid = ?", (uid,))
-        return cur.fetchone() is not None
+        return uid in self._imap["seen_uids"]
 
     def mark_email_seen(self, uid: str) -> None:
-        self._db.execute(
-            "INSERT OR IGNORE INTO processed_emails(uid, seen_at) VALUES(?, ?)",
-            (uid, _now()),
-        )
-        self._db.commit()
+        seen = self._imap["seen_uids"]
+        seen[uid] = _now()
+        while len(seen) > MAX_SEEN_UIDS:
+            del seen[next(iter(seen))]  # oldest inserted
+        self._save_json(IMAP_FILE, self._imap)
 
-    # -- replay cache -------------------------------------------------------
+    def get_meta(self, key: str) -> str | None:
+        return self._imap["meta"].get(key)
+
+    def set_meta(self, key: str, value: str) -> None:
+        self._imap["meta"][key] = value
+        self._save_json(IMAP_FILE, self._imap)
+
+    # -- replay cache -----------------------------------------------------------
 
     def replay_seen(self, body_hash: str) -> bool:
-        cur = self._db.execute("SELECT 1 FROM replay_cache WHERE body_hash = ?", (body_hash,))
-        return cur.fetchone() is not None
+        return body_hash in self._replay
 
     def replay_add(self, body_hash: str) -> None:
-        self._db.execute(
-            "INSERT OR IGNORE INTO replay_cache(body_hash, seen_at) VALUES(?, ?)",
-            (body_hash, _now()),
-        )
-        self._db.commit()
+        if body_hash in self._replay:
+            return
+        self._replay[body_hash] = _now()
+        while len(self._replay) > MAX_REPLAY_ENTRIES:
+            del self._replay[next(iter(self._replay))]  # oldest inserted
+        self._save_json(REPLAY_FILE, self._replay)
 
-    # -- one-time plaintext code -------------------------------------------
+    # -- one-time plaintext code ------------------------------------------------
 
     def armed_code_hash(self) -> str | None:
-        """Hash of the currently armed (not yet used) code, if any."""
-        cur = self._db.execute("SELECT hash FROM plaintext_code WHERE used_at IS NULL")
-        row = cur.fetchone()
-        return row["hash"] if row else None
+        armed = self._code["armed"]
+        return armed["hash"] if armed else None
 
     def arm_code(self, code: str) -> str:
         """Arm a new one-time code; any previously armed (unused) code dies."""
         h = hash_code(code)
-        now = _now()
-        self._db.execute(
-            "UPDATE plaintext_code SET used_at = ? WHERE used_at IS NULL AND hash != ?",
-            (now, h),
-        )
-        self._db.execute(
-            "INSERT INTO plaintext_code(hash, set_at) VALUES(?, ?) "
-            "ON CONFLICT(hash) DO UPDATE SET set_at = excluded.set_at, used_at = NULL",
-            (h, now),
-        )
-        self._db.commit()
+        armed = self._code["armed"]
+        if armed and armed["hash"] != h:
+            self._code["used"].append({**armed, "used_at": _now()})
+        self._code["used"] = [u for u in self._code["used"] if u["hash"] != h]
+        self._code["armed"] = {"hash": h, "set_at": _now()}
+        self._save_json(CODE_FILE, self._code)
         return h
 
     def burn_code(self, code_hash: str) -> None:
-        self._db.execute(
-            "UPDATE plaintext_code SET used_at = ? WHERE hash = ?", (_now(), code_hash)
-        )
-        self._db.commit()
+        armed = self._code["armed"]
+        if armed and armed["hash"] == code_hash:
+            self._code["used"].append({**armed, "used_at": _now()})
+            self._code["armed"] = None
+            self._save_json(CODE_FILE, self._code)
 
     def code_used(self, code_hash: str) -> bool:
-        cur = self._db.execute(
-            "SELECT 1 FROM plaintext_code WHERE hash = ? AND used_at IS NOT NULL",
-            (code_hash,),
-        )
-        return cur.fetchone() is not None
+        return any(u["hash"] == code_hash for u in self._code["used"])
 
     def clear_codes(self) -> int:
-        cur = self._db.execute("DELETE FROM plaintext_code")
-        self._db.commit()
-        return cur.rowcount
+        count = (1 if self._code["armed"] else 0) + len(self._code["used"])
+        self._code["armed"] = None
+        self._code["used"] = []
+        self._save_json(CODE_FILE, self._code)
+        return count
 
     # -- audit --------------------------------------------------------------
 
@@ -160,22 +185,22 @@ class Store:
         reason: str | None = None,
         session_id: str | None = None,
     ) -> None:
-        self._db.execute(
-            "INSERT INTO attempts(ts, imap_uid, sender, mode, outcome, reason, session_id) "
-            "VALUES(?,?,?,?,?,?,?)",
-            (_now(), imap_uid, sender, mode, outcome, reason, session_id),
-        )
-        self._db.commit()
+        entry = {
+            "ts": _now(),
+            "imap_uid": imap_uid,
+            "sender": sender,
+            "mode": mode,
+            "outcome": outcome,
+            "reason": reason,
+            "session_id": session_id,
+        }
+        self._append_jsonl(self._path(ATTEMPTS_FILE), entry)
 
     def recent_attempts(self, limit: int = 50) -> list[dict[str, Any]]:
-        cur = self._db.execute(
-            "SELECT ts, imap_uid, sender, mode, outcome, reason, session_id "
-            "FROM attempts ORDER BY id DESC LIMIT ?",
-            (limit,),
-        )
-        return [dict(r) for r in cur.fetchall()]
+        rows = self._read_jsonl(ATTEMPTS_FILE)
+        return list(reversed(rows[-limit:]))  # newest first
 
-    # -- sessions -----------------------------------------------------------
+    # -- sessions (event stream) ---------------------------------------------
 
     def create_session(
         self,
@@ -188,51 +213,43 @@ class Store:
         ttl: int,
         status: str,
     ) -> None:
-        self._db.execute(
-            "INSERT INTO sessions(id, host, port, ssh_user, forwards, ttl, status, started_at) "
-            "VALUES(?,?,?,?,?,?,?,?)",
-            (session_id, host, port, ssh_user, forwards, ttl, status, _now()),
+        self._append_jsonl(
+            self._path(SESSIONS_FILE),
+            {
+                "ts": _now(),
+                "event": "created",
+                "session_id": session_id,
+                "host": host,
+                "port": port,
+                "ssh_user": ssh_user,
+                "forwards": forwards,
+                "ttl": ttl,
+                "status": status,
+            },
         )
-        self._db.commit()
 
     def update_session(self, session_id: str, status: str) -> None:
-        self._db.execute(
-            "UPDATE sessions SET status = ?, ended_at = ? WHERE id = ?",
-            (status, _now(), session_id),
+        self._append_jsonl(
+            self._path(SESSIONS_FILE),
+            {"ts": _now(), "event": "status", "session_id": session_id, "status": status},
         )
-        self._db.commit()
 
     def add_session_event(
         self, session_id: str, event: str, detail: str | None = None
     ) -> None:
-        self._db.execute(
-            "INSERT INTO session_events(session_id, ts, event, detail) VALUES(?,?,?,?)",
-            (session_id, _now(), event, detail),
+        self._append_jsonl(
+            self._path(SESSIONS_FILE),
+            {"ts": _now(), "session_id": session_id, "event": event, "detail": detail},
         )
-        self._db.commit()
 
     def session_events(self, session_id: str, limit: int = 40) -> list[dict[str, Any]]:
-        cur = self._db.execute(
-            "SELECT ts, event, detail FROM session_events WHERE session_id = ? "
-            "ORDER BY id DESC LIMIT ?",
-            (session_id, limit),
-        )
-        return [dict(r) for r in cur.fetchall()]
-
-    # -- meta ---------------------------------------------------------------
-
-    def get_meta(self, key: str) -> str | None:
-        cur = self._db.execute("SELECT value FROM meta WHERE key = ?", (key,))
-        row = cur.fetchone()
-        return row["value"] if row else None
-
-    def set_meta(self, key: str, value: str) -> None:
-        self._db.execute(
-            "INSERT INTO meta(key, value) VALUES(?, ?) "
-            "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
-            (key, value),
-        )
-        self._db.commit()
+        rows = [
+            {"ts": r.get("ts"), "event": r["event"], "detail": r.get("detail")}
+            for r in self._read_jsonl(SESSIONS_FILE)
+            if r.get("session_id") == session_id
+            and r["event"] not in ("created", "status")  # lifecycle bookkeeping
+        ]
+        return list(reversed(rows[-limit:]))  # newest first
 
     # -- retention ------------------------------------------------------------
 
@@ -240,6 +257,6 @@ class Store:
         if retention_days <= 0:
             return
         cutoff = (datetime.now(UTC) - timedelta(days=retention_days)).isoformat()
-        for table in ("attempts", "session_events"):
-            self._db.execute(f"DELETE FROM {table} WHERE ts < ?", (cutoff,))
-        self._db.commit()
+        for name in (ATTEMPTS_FILE, SESSIONS_FILE):
+            rows = [r for r in self._read_jsonl(name) if r.get("ts", "") >= cutoff]
+            self._rewrite_jsonl(name, rows)

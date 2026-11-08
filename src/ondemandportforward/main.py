@@ -93,7 +93,7 @@ def make_handler(
 
 async def run_daemon() -> None:
     cfg = Config.from_env()
-    store = Store(cfg.db_path)
+    store = Store(cfg.data_dir)
     store.prune(cfg.log_retention_days)
 
     if cfg.plaintext_code and store.armed_code_hash() is None:

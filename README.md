@@ -6,8 +6,6 @@ reverse SSH tunnel (`ssh -R`) to the host named in the letter, so a remote
 machine can reach services on your internal network. The daemon replies by
 email with connection details or error logs.
 
-See `project.md` for the full design spec (in Russian).
-
 ## How it works
 
 1. Daemon polls the mailbox (IMAP IDLE, poll fallback).
@@ -16,7 +14,7 @@ See `project.md` for the full design spec (in Russian).
      block, encrypted with your shared passphrase (`SECRET`).
    - **Plaintext** (emergency fallback, when gpg is unavailable): plain
      `key: value` body plus a one-time `code:` line. The code burns on first use.
-3. Authenticated letter -> tunnel `ssh -R <remote_port>:<internal_host>:<local_port> user@remote`
+3. Authenticated letter -> tunnel `ssh -R <remote_port>:localhost:<local_port> user@remote`
    opens for a limited TTL (default 30 min).
 4. Reply email: success (connect instructions) or failure (last log lines).
    Replies are prefixed `[ondemandportforward]` and never re-processed.
@@ -62,9 +60,8 @@ SECRET=long-random-passphrase   # gpg passphrase for command letters
 ```
 
 Useful optional: `SMTP_USER`/`SMTP_PASSWORD` (default = IMAP creds),
-`PLAINTEXT_CODE` (initial one-time code), `INTERNAL_HOST` (target side of
-forwards; compose sets it to `host.docker.internal` so tunnels reach the host
-machine, not the container), `STRICT_HEADERS=1` (require spf/dkim pass).
+`PLAINTEXT_CODE` (initial one-time code), `STRICT_HEADERS=1` (require
+spf/dkim pass).
 
 ## Launch (always-on)
 
@@ -82,16 +79,29 @@ Equivalent plain `docker run`:
 docker run -d --name ondemandportforward \
   --restart unless-stopped \
   --env-file .env \
-  -e INTERNAL_HOST=host.docker.internal \
-  --add-host host.docker.internal:host-gateway \
   -v ondemandportforward_data:/data \
   ondemandportforward:latest
 ```
 
-State (sqlite: audit log, replay cache, code, watermark) lives in the
-`/data` volume. For tunnels to the host's own services keep
-`INTERNAL_HOST=host.docker.internal`; if you run with `--network host`,
-use `localhost` instead.
+## State and logs
+
+All state lives in the `/data` volume as plain files, readable outside the
+container:
+
+```
+imap.json      # mailbox watermark (last_uid, seen UIDs)
+replay.json    # replay cache of processed ciphertexts
+code.json      # one-time password usage state (armed + burned codes)
+sessions.jsonl # session lifecycle log (start/up/retry/ttl_kill/exit/fail)
+attempts.jsonl # audit of every email attempt (accept/reject/ignore + reason)
+```
+
+```bash
+docker compose exec ondemandportforward tail -20 /data/attempts.jsonl
+```
+
+Forwards target `localhost` as seen from the daemon. To tunnel into the
+services of the machine the container runs on, launch it with `--network host`.
 
 ## Sending a command letter
 
@@ -137,10 +147,9 @@ readable to the mail provider).
 
 ```bash
 docker compose logs -f                              # daemon log
-docker compose run --rm ondemandportforward health  # store check
-# last 20 attempts (audit trail):
-docker compose run --rm --entrypoint python ondemandportforward -c \
-  "from ondemandportforward.store import Store; [print(r) for r in Store('/data/ondemandportforward.db').recent_attempts(20)]"
+docker compose run --rm ondemandportforward health  # state files check
+docker compose exec ondemandportforward tail -20 /data/attempts.jsonl
+docker compose exec ondemandportforward tail -20 /data/sessions.jsonl
 ```
 
 ## Security notes
