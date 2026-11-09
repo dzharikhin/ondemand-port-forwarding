@@ -42,6 +42,19 @@ def extract_body(msg: EmailMessage) -> str:
     return ""
 
 
+class ImapError(Exception):
+    pass
+
+
+def _server_error(resp) -> str:
+    """Human-readable text from an aioimaplib Response (result is not OK)."""
+    text = " ".join(
+        line.decode(errors="replace") if isinstance(line, bytes) else str(line)
+        for line in resp.lines
+    ).strip()
+    return text or resp.result
+
+
 class ImapClient:
     def __init__(self, cfg: Config, store: Store | None = None) -> None:
         self.cfg = cfg
@@ -75,10 +88,27 @@ class ImapClient:
         else:
             c = aioimaplib.IMAP4(host=self.cfg.imap_host, port=self.cfg.imap_port, timeout=60)
         await c.wait_hello_from_server()
-        await c.login(self.cfg.imap_user, self.cfg.imap_password)
-        await c.select("INBOX")
+        resp = await c.login(self.cfg.imap_user, self.cfg.imap_password)
+        if resp.result != "OK":
+            await self._quiet_logout(c)
+            raise ImapError(
+                f"IMAP login rejected for {self.cfg.imap_user} on {self.cfg.imap_host}: "
+                f"{_server_error(resp)}"
+            )
+        resp = await c.select("INBOX")
+        if resp.result != "OK":
+            await self._quiet_logout(c)
+            raise ImapError(
+                f"IMAP SELECT INBOX failed on {self.cfg.imap_host}: {_server_error(resp)}"
+            )
         self.client = c
         log.info("connected to %s as %s", self.cfg.imap_host, self.cfg.imap_user)
+
+    async def _quiet_logout(self, c: aioimaplib.IMAP4) -> None:
+        try:
+            await c.logout()
+        except Exception:  # noqa: BLE001
+            pass
 
     async def _close(self) -> None:
         if self.client is not None:
