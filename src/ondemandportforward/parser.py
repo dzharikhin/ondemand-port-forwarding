@@ -20,7 +20,9 @@ class Command:
     ssh_user: str
     ssh_password: str
     port: int = 22
-    forwards: list[tuple[int, int]] = field(default_factory=lambda: [(2222, 22)])
+    forwards: list[tuple[int, str, int]] = field(
+        default_factory=lambda: [(2222, "localhost", 22)]
+    )
     ttl: int = 1800
     code: str = ""
 
@@ -35,26 +37,38 @@ def _parse_port(value: str, what: str) -> int:
     return port
 
 
-def _parse_forwards(value: str) -> list[tuple[int, int]]:
-    result: list[tuple[int, int]] = []
+def _parse_forwards(value: str) -> list[tuple[int, str, int]]:
+    """Each item is 'remote:local' or 'remote:host:local' (host defaults to localhost)."""
+    result: list[tuple[int, str, int]] = []
     for chunk in value.split(","):
         chunk = chunk.strip()
         if not chunk:
             continue
         parts = chunk.split(":")
-        if len(parts) != 2:
-            raise ParseError(f"bad forward {chunk!r}, expected 'remote:local'")
+        if len(parts) == 2:
+            host = "localhost"
+            remote_s, local_s = parts
+        elif len(parts) == 3:
+            remote_s, host, local_s = parts
+            host = host.strip()
+            if not host or len(host) > 253 or "/" in host or " " in host:
+                raise ParseError(f"bad forward host {host!r} in {chunk!r}")
+        else:
+            raise ParseError(
+                f"bad forward {chunk!r}, expected 'remote:local' or 'remote:host:local'"
+            )
         result.append(
             (
-                _parse_port(parts[0].strip(), "remote port"),
-                _parse_port(parts[1].strip(), "local port"),
+                _parse_port(remote_s.strip(), "remote port"),
+                host,
+                _parse_port(local_s.strip(), "local port"),
             )
         )
     if not result:
         raise ParseError("no valid forwards given")
     if len(result) > MAX_FORWARDS:
         raise ParseError(f"too many forwards (max {MAX_FORWARDS})")
-    if len({r for r, _ in result}) != len(result):
+    if len({r for r, _, _ in result}) != len(result):
         raise ParseError("duplicate remote ports in forwards")
     return result
 
@@ -88,7 +102,7 @@ def parse_command(body: str, ttl_default: int = 1800) -> Command:
     forwards = (
         _parse_forwards(fields["forwards"])
         if fields.get("forwards")
-        else [(2222, 22)]
+        else [(2222, "localhost", 22)]
     )
 
     ttl = ttl_default

@@ -27,7 +27,8 @@ def make_manager(cfg, store, argv_list) -> SessionManager:
 
 
 def make_cmd(**kw) -> Command:
-    base = dict(host="h.example", ssh_user="u", ssh_password="p", ttl=3, forwards=[(2222, 22)])
+    base = dict(host="h.example", ssh_user="u", ssh_password="p", ttl=3,
+                forwards=[(2222, "localhost", 22)])
     base.update(kw)
     return Command(**base)
 

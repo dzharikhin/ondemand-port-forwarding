@@ -18,6 +18,7 @@ class Config:
 
     imap_port: int = 993
     imap_tls: bool = True
+    imap_mailbox: str = "INBOX"
     smtp_port: int = 465
     smtp_user: str = ""
     smtp_password: str = ""
@@ -66,6 +67,7 @@ class Config:
             secret=req("SECRET"),
             imap_port=opt_int("IMAP_PORT", 993),
             imap_tls=not opt_bool("IMAP_TLS_OFF"),
+            imap_mailbox=e.get("IMAP_MAILBOX", "").strip() or "INBOX",
             smtp_port=opt_int("SMTP_PORT", 465),
             smtp_user=e.get("SMTP_USER", "").strip(),
             smtp_password=e.get("SMTP_PASSWORD", ""),

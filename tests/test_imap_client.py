@@ -16,6 +16,9 @@ class FakeImap4:
     instances: list[FakeImap4] = []
     login_result: str = "OK"
     select_result: str = "OK"
+    selected_mailbox: list[str] = []
+    uidvalidity: int | None = 111
+    search_uids: bytes = b"* SEARCH 139851 139852"
 
     def __init__(self, **kwargs) -> None:
         self.login_result = FakeImap4.login_result
@@ -33,7 +36,12 @@ class FakeImap4:
         )
 
     async def select(self, mailbox: str) -> FakeResponse:
-        return FakeResponse(self.select_result)
+        FakeImap4.selected_mailbox.append(mailbox)
+        lines = [f"* OK [UIDVALIDITY {FakeImap4.uidvalidity}] UIDs valid".encode()]
+        return FakeResponse(self.select_result, lines)
+
+    async def uid_search(self, *criteria: str) -> FakeResponse:
+        return FakeResponse("OK", [FakeImap4.search_uids])
 
     async def logout(self) -> FakeResponse:
         self.logged_out = True
@@ -45,6 +53,8 @@ def fake_imap(monkeypatch):
     FakeImap4.instances = []
     FakeImap4.login_result = "OK"
     FakeImap4.select_result = "OK"
+    FakeImap4.selected_mailbox = []
+    FakeImap4.uidvalidity = 111
     monkeypatch.setattr(aioimaplib, "IMAP4_SSL", FakeImap4)
     return FakeImap4
 
@@ -69,6 +79,65 @@ async def test_select_failure_raises(cfg, fake_imap):
 
     assert client.client is None
     assert fake_imap.instances[-1].logged_out
+
+
+async def test_configured_mailbox_is_selected(cfg, fake_imap):
+    cfg.imap_mailbox = "INBOX/ToMyself"
+    client = ImapClient(cfg)
+
+    await client._ensure_connected()
+
+    assert fake_imap.selected_mailbox == ["INBOX/ToMyself"]
+
+
+async def test_bootstrap_restores_matching_watermark(cfg, fake_imap, store):
+    store.set_meta("last_uid", "139852")
+    store.set_meta("uidvalidity", "111")
+    store.set_meta("uid_mode", "1")
+    client = ImapClient(cfg, store)
+
+    await client._ensure_connected()
+    await client._bootstrap_last_uid()
+
+    assert client.last_uid == 139852
+
+
+async def test_bootstrap_resets_stale_watermark(cfg, fake_imap, store):
+    # legacy store: watermark saved without uidvalidity (or from another mailbox)
+    store.set_meta("last_uid", "16433")
+    client = ImapClient(cfg, store)
+
+    await client._ensure_connected()
+    await client._bootstrap_last_uid()
+
+    assert client.last_uid == 139852  # re-bootstrapped from search, not 16433
+    assert store.get_meta("uidvalidity") == "111"
+    assert store.get_meta("uid_mode") == "1"
+    assert store.get_meta("last_uid") == "139852"
+
+
+async def test_bootstrap_resets_on_uidvalidity_change(cfg, fake_imap, store):
+    store.set_meta("last_uid", "100")
+    store.set_meta("uidvalidity", "999")  # server rebuilt the mailbox
+    store.set_meta("uid_mode", "1")
+    client = ImapClient(cfg, store)
+
+    await client._ensure_connected()
+    await client._bootstrap_last_uid()
+
+    assert client.last_uid == 139852
+
+
+async def test_bootstrap_resets_sequence_number_watermark(cfg, fake_imap, store):
+    # written by a build whose SEARCH returned sequence numbers: no uid_mode
+    store.set_meta("last_uid", "13017")
+    store.set_meta("uidvalidity", "111")  # matching uidvalidity is not enough
+    client = ImapClient(cfg, store)
+
+    await client._ensure_connected()
+    await client._bootstrap_last_uid()
+
+    assert client.last_uid == 139852
 
 
 async def test_successful_connect(cfg, fake_imap):

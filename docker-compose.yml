@@ -2,17 +2,15 @@ services:
   ondemandportforward:
     build: .
     image: ondemandportforward:latest
+    network_mode: host
     env_file: .env
     environment:
       DATA_DIR: /data
     volumes:
-      - ondemandportforward_data:/data
+      - ./data:/data
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "ondemandportforward", "health"]
       interval: 5m
       timeout: 10s
       retries: 2
-
-volumes:
-  ondemandportforward_data:

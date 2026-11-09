@@ -27,12 +27,53 @@ Letter body fields:
 | `user` | yes | — | ssh login on the remote machine |
 | `password` | yes | — | ssh password (masked in all logs/replies) |
 | `port` | no | `22` | sshd port on the remote machine |
-| `forwards` | no | `2222:22` | comma list `remote_port:local_port` |
+| `forwards` | no | `2222:22` | comma list `remote:local` or `remote:host:local`; host defaults to `localhost` (as seen from the daemon) |
 | `ttl` | no | `1800` | seconds, 60..86400 |
 | `code` | plaintext mode | — | current one-time code |
 
-After the tunnel is up, on the remote machine: `ssh -p 2222 <user>@localhost`
-(forward `2222:22`) reaches the ssh of the machine the daemon runs on.
+### Forward targets
+
+Each `forwards:` item names a listener on the mediator and where it leads back
+to, **as dialed from the daemon container**:
+
+| Letter | Meaning | Use when |
+|---|---|---|
+| `forwards: 2222:22` | mediator:2222 → daemon's `localhost:22` | the daemon really runs with host networking and you want its own sshd |
+| `forwards: 2222:192.168.1.124:22` | mediator:2222 → `192.168.1.124:22` | the daemon host's LAN IP (example IP — use yours; works from any container network mode), or a different machine entirely (e.g. a NAS: `2222:192.168.1.50:22`) |
+
+Both forms mix in a comma list:
+
+```
+forwards: 2222:22, 8080:192.168.1.50:8080
+```
+
+The remote port (left side) must be unique per letter; hostnames are allowed
+on the right (`2222:nas.lan:22`). IPv6 literals are not supported in the
+target position (colons conflict with the syntax).
+
+See [State and logs](#state-and-logs) for the podman-compose host-networking
+caveat that makes the `host:port` form the safe default.
+
+## Connecting through the tunnel
+
+With the default forward `2222:22`, once the tunnel is up, port `2222` on the
+letter's `host` (the mediator) leads back to the sshd of the machine the
+daemon runs on (or to whatever `host:port` you named in `forwards:` — the
+connect commands stay the same). Two ways in:
+
+On the mediator itself:
+
+```bash
+ssh -p 2222 <your-user-on-daemon-machine>@localhost
+```
+
+From anywhere else, using the mediator as a jump host (one command):
+
+```bash
+ssh -J <letter-user>@<letter-host> -p 2222 <your-user-on-daemon-machine>@localhost
+```
+
+(`your-user` is an account on the daemon machine — not the letter's ssh user.)
 
 ## Build the image
 
@@ -63,6 +104,10 @@ Useful optional: `SMTP_USER`/`SMTP_PASSWORD` (default = IMAP creds),
 `PLAINTEXT_CODE` (initial one-time code), `STRICT_HEADERS=1` (require
 spf/dkim pass).
 
+> **mail.ru users:** the provider auto-sorts mail you send to yourself into
+> the `INBOX/ToMyself` subfolder — the daemon never sees it in plain `INBOX`.
+> Set `IMAP_MAILBOX=INBOX/ToMyself` in `.env`.
+
 ## Launch (always-on)
 
 Recommended — compose (`restart: unless-stopped` + healthcheck are configured,
@@ -78,18 +123,19 @@ Equivalent plain `docker run`:
 ```bash
 docker run -d --name ondemandportforward \
   --restart unless-stopped \
+  --network host \
   --env-file .env \
-  -v ondemandportforward_data:/data \
+  -v "$(pwd)/data:/data" \
   ondemandportforward:latest
 ```
 
 ## State and logs
 
-All state lives in the `/data` volume as plain files, readable outside the
-container:
+All state lives in the `./data` bind mount (container path `/data`) as plain
+files, readable outside the container:
 
 ```
-imap.json      # mailbox watermark (last_uid, seen UIDs)
+imap.json      # mailbox watermark (last_uid + uidvalidity)
 replay.json    # replay cache of processed ciphertexts
 code.json      # one-time password usage state (armed + burned codes)
 sessions.jsonl # session lifecycle log (start/up/retry/ttl_kill/exit/fail)
@@ -100,8 +146,19 @@ attempts.jsonl # audit of every email attempt (accept/reject/ignore + reason)
 docker compose exec ondemandportforward tail -20 /data/attempts.jsonl
 ```
 
-Forwards target `localhost` as seen from the daemon. To tunnel into the
-services of the machine the container runs on, launch it with `--network host`.
+Forwards target `localhost` as seen from the daemon — with real host
+networking (`network_mode: host` in docker-compose.yml) this is the daemon
+machine itself (the plain `docker run` equivalent needs `--network host`).
+
+Caveat: some runtimes (notably podman-compose) report `network_mode: host`
+without actually giving the container the host network namespace, so
+`localhost` targets nothing. Verify with
+`docker compose exec ondemandportforward cat /proc/net/dev` vs the host, or
+skip the guesswork: point the forward at the daemon host's LAN IP directly —
+`forwards: 2222:192.168.1.20:22` (works from any namespace).
+
+Tunnel up but connections close instantly? The forward's target host:port
+refused the connection — usually no sshd on the target or wrong address.
 
 ## Sending a command letter
 
@@ -113,10 +170,7 @@ Interactive helper builds and encrypts the letter for you:
 docker compose run --rm ondemandportforward encrypt
 ```
 
-Paste the printed `-----BEGIN PGP MESSAGE-----` block as the email body
-(plain text, not HTML) and send it to your own address.
-
-Manual, on any machine with gpg (passphrase = `SECRET`):
+Manual, on any machine with gpg (symmetric, passphrase = `SECRET`):
 
 ```bash
 cat > body.txt <<EOF
@@ -126,8 +180,42 @@ password: hunter2
 forwards: 2222:22
 ttl: 1800
 EOF
-gpg -a -c --cipher-algo AES256 body.txt
+gpg -a -c --cipher-algo AES256 body.txt   # writes body.txt.asc
+# no real host networking, or the target is another machine?
+# edit body.txt first, e.g. "forwards: 2222:192.168.1.124:22", and re-encrypt
 ```
+
+#### How to send it
+
+Yes — just paste the ciphertext into the message body. The email must look
+like this:
+
+| Part | Requirement |
+|---|---|
+| From | your own address (`IMAP_USER`); anything else is rejected as `bad_sender` |
+| To | your own address |
+| Subject | ignored |
+| Body | the full `-----BEGIN PGP MESSAGE-----` ... `-----END PGP MESSAGE-----` block from `body.txt.asc` |
+
+- The letter must land in the watched mailbox (`IMAP_MAILBOX`, default
+  `INBOX`). Providers that auto-sort self-sent mail into a subfolder (e.g.
+  mail.ru → `INBOX/ToMyself`) will hide it from the daemon — set
+  `IMAP_MAILBOX` accordingly (see Configure).
+
+- Paste the block as **plain text, not HTML** (switch your mail client to
+  plain-text composing; HTML mode can mangle the base64 with soft line breaks
+  or NBSP and decryption fails).
+- Text before or after the block is ignored — the first PGP block in the body
+  wins.
+- No `code:` line in this mode; that field is plaintext-fallback only.
+
+Rules to remember:
+
+- **Symmetric** encryption with the `SECRET` passphrase — not public-key.
+- Every ciphertext is **single-use**: the replay cache burns the block on the
+  first attempt, even a failed one (e.g. wrong `SECRET`, corrupted paste).
+  Never resend the same block — re-encrypt; a fresh encryption of the same
+  plaintext is new ciphertext and works.
 
 ### Plaintext fallback (one-time code)
 

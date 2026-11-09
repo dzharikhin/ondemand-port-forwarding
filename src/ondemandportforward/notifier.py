@@ -40,8 +40,8 @@ class Notifier:
             "",
             "Forwarded ports (on the remote host):",
         ]
-        for remote, local in cmd.forwards:
-            hint = f"  localhost:{remote} -> internal localhost:{local}"
+        for remote, host, local in cmd.forwards:
+            hint = f"  localhost:{remote} -> {host}:{local}"
             if local == 22:
                 hint += f"   (ssh: `ssh -p {remote} <user>@localhost` on {cmd.host})"
             lines.append(hint)

@@ -7,7 +7,7 @@ def test_minimal_body_defaults():
     cmd = parse_command("host: 1.2.3.4\nuser: root\npassword: pw\n")
     assert cmd.host == "1.2.3.4"
     assert cmd.port == 22
-    assert cmd.forwards == [(2222, 22)]
+    assert cmd.forwards == [(2222, "localhost", 22)]
     assert cmd.ttl == 1800
     assert cmd.code == ""
 
@@ -24,7 +24,7 @@ def test_full_body():
     )
     cmd = parse_command(body, ttl_default=999)
     assert cmd.port == 2222
-    assert cmd.forwards == [(2200, 22), (8080, 80)]
+    assert cmd.forwards == [(2200, "localhost", 22), (8080, "localhost", 80)]
     assert cmd.ttl == 600
     assert cmd.code == "12345"
     assert cmd.ssh_password == "my secret pass"
@@ -57,6 +57,24 @@ def test_bad_forwards():
         parse_command("host: h\nuser: u\npassword: p\nforwards: 22\n")
     with pytest.raises(ParseError, match="port"):
         parse_command("host: h\nuser: u\npassword: p\nforwards: a:b\n")
+    with pytest.raises(ParseError, match="forward"):
+        parse_command("host: h\nuser: u\npassword: p\nforwards: 1:2:3:4\n")
+
+
+def test_forwards_with_host():
+    cmd = parse_command(
+        "host: h\nuser: u\npassword: p\nforwards: 2222:192.168.1.124:22\n"
+    )
+    assert cmd.forwards == [(2222, "192.168.1.124", 22)]
+    cmd = parse_command(
+        "host: h\nuser: u\npassword: p\nforwards: 2200:22, 8080:nas.lan:8080\n"
+    )
+    assert cmd.forwards == [
+        (2200, "localhost", 22),
+        (8080, "nas.lan", 8080),
+    ]
+    with pytest.raises(ParseError, match="forward host"):
+        parse_command("host: h\nuser: u\npassword: p\nforwards: 2222:bad host:22\n")
 
 
 def test_duplicate_remote_ports_rejected():

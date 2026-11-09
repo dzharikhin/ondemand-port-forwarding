@@ -26,7 +26,10 @@ def cmd_encrypt(args: argparse.Namespace) -> int:
     port = input("SSH port [22]: ").strip() or "22"
     user = input("SSH user: ").strip()
     password = getpass.getpass("SSH password: ")
-    forwards = input("Forwards remote:local [2222:22]: ").strip() or "2222:22"
+    forwards = (
+        input("Forwards remote:local or remote:host:local [2222:22]: ").strip()
+        or "2222:22"
+    )
     ttl = input("TTL seconds [1800]: ").strip() or "1800"
 
     body = (

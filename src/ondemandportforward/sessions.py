@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import os
 import secrets
 import time
@@ -12,6 +13,8 @@ from typing import Any
 from .config import Config
 from .parser import Command
 from .store import Store
+
+log = logging.getLogger("ondemandportforward.sessions")
 
 STATUS_STARTING = "starting"
 STATUS_UP = "up"
@@ -37,8 +40,8 @@ def default_command_factory(cmd: Command) -> tuple[list[str], dict[str, str]]:
         "-o",
         "ServerAliveCountMax=3",
     ]
-    for remote, local in cmd.forwards:
-        argv += ["-R", f"{remote}:localhost:{local}"]
+    for remote, host, local in cmd.forwards:
+        argv += ["-R", f"{remote}:{host}:{local}"]
     argv += [f"{cmd.ssh_user}@{cmd.host}"]
     env = {"SSHPASS": cmd.ssh_password}
     return argv, env
@@ -56,7 +59,9 @@ class Session:
 
     @property
     def forwards_desc(self) -> str:
-        return ", ".join(f"{remote}:{local}" for remote, local in self.command.forwards)
+        return ", ".join(
+            f"{remote}:{host}:{local}" for remote, host, local in self.command.forwards
+        )
 
 
 class SessionManager:
@@ -81,7 +86,7 @@ class SessionManager:
             port=cmd.port,
             ssh_user=cmd.ssh_user,
             forwards=",".join(
-                f"{remote}:{local}" for remote, local in cmd.forwards
+                f"{remote}:{host}:{local}" for remote, host, local in cmd.forwards
             ),
             ttl=cmd.ttl,
             status=STATUS_STARTING,
@@ -94,6 +99,17 @@ class SessionManager:
     async def _run(self, session: Session) -> None:
         cmd = session.command
         deadline = time.monotonic() + cmd.ttl
+        expires_at = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(time.time() + cmd.ttl))
+        log.info(
+            "session %s started: tunnel to %s@%s:%s, forwards=[%s], ttl=%ss (expires %s)",
+            session.id,
+            cmd.ssh_user,
+            cmd.host,
+            cmd.port,
+            session.forwards_desc,
+            cmd.ttl,
+            expires_at,
+        )
         attempts_left = self.cfg.retries + 1
 
         while attempts_left > 0 and time.monotonic() < deadline:
@@ -125,11 +141,17 @@ class SessionManager:
                 session.status = STATUS_UP
                 self.store.update_session(session.id, STATUS_UP)
                 self.store.add_session_event(session.id, "up")
+                log.info("session %s up, closes at %s", session.id, expires_at)
 
                 remaining = deadline - time.monotonic()
                 try:
                     await asyncio.wait_for(asyncio.shield(exit_task), timeout=remaining)
                 except TimeoutError:
+                    log.info(
+                        "session %s closed by TTL (was up for %ss)",
+                        session.id,
+                        cmd.ttl,
+                    )
                     await self._stop(proc, session, STATUS_EXPIRED, "ttl")
                     await reader
                     return
@@ -137,6 +159,11 @@ class SessionManager:
                     await reader
                     session.status = STATUS_DIED
                     session.established.clear()
+                    log.warning(
+                        "session %s died after establishment (exit=%s)",
+                        session.id,
+                        proc.returncode,
+                    )
                     self.store.add_session_event(
                         session.id,
                         "died",
@@ -163,6 +190,7 @@ class SessionManager:
             self.store.update_session(session.id, STATUS_FAILED)
             tail = "\n".join(list(session.log)[-ERROR_LOG_LINES:])
             self.store.add_session_event(session.id, "failed", tail)
+            log.error("session %s failed to establish", session.id)
 
     async def _pump_stderr(self, proc: asyncio.subprocess.Process, session: Session) -> None:
         assert proc.stderr is not None

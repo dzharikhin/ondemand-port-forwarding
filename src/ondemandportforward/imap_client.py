@@ -55,12 +55,25 @@ def _server_error(resp) -> str:
     return text or resp.result
 
 
+def _response_text(resp) -> str:
+    return " ".join(
+        line.decode(errors="replace") if isinstance(line, bytes) else str(line)
+        for line in resp.lines
+    )
+
+
+def _uidvalidity_from_response(resp) -> int | None:
+    m = re.search(r"UIDVALIDITY (\d+)", _response_text(resp))
+    return int(m.group(1)) if m else None
+
+
 class ImapClient:
     def __init__(self, cfg: Config, store: Store | None = None) -> None:
         self.cfg = cfg
         self.store = store
         self.client: aioimaplib.IMAP4 | None = None
         self.last_uid = 0
+        self.uidvalidity: int | None = None
 
     async def run(self, handler: Handler) -> None:
         while True:
@@ -95,14 +108,21 @@ class ImapClient:
                 f"IMAP login rejected for {self.cfg.imap_user} on {self.cfg.imap_host}: "
                 f"{_server_error(resp)}"
             )
-        resp = await c.select("INBOX")
+        resp = await c.select(self.cfg.imap_mailbox)
         if resp.result != "OK":
             await self._quiet_logout(c)
             raise ImapError(
-                f"IMAP SELECT INBOX failed on {self.cfg.imap_host}: {_server_error(resp)}"
+                f"IMAP SELECT {self.cfg.imap_mailbox} failed on {self.cfg.imap_host}: "
+                f"{_server_error(resp)}"
             )
         self.client = c
-        log.info("connected to %s as %s", self.cfg.imap_host, self.cfg.imap_user)
+        self.uidvalidity = _uidvalidity_from_response(resp)
+        log.info(
+            "connected to %s as %s (mailbox %s)",
+            self.cfg.imap_host,
+            self.cfg.imap_user,
+            self.cfg.imap_mailbox,
+        )
 
     async def _quiet_logout(self, c: aioimaplib.IMAP4) -> None:
         try:
@@ -126,21 +146,51 @@ class ImapClient:
             return
         if self.store is not None:
             saved = self.store.get_meta("last_uid")
-            if saved is not None:
+            saved_uv = self.store.get_meta("uidvalidity")
+            saved_mode = self.store.get_meta("uid_mode")
+            if (
+                saved is not None
+                and saved_mode == "1"
+                and self._watermark_valid(saved_uv)
+            ):
                 self.last_uid = int(saved)
                 log.info("restored watermark from store: UID %s", self.last_uid)
                 return
-        uids = await self._search_uids("UID", "1:*")
+            if saved is not None:
+                log.warning(
+                    "stored watermark UID %s is not valid for this mailbox "
+                    "(uidvalidity stored=%s current=%s, uid_mode=%s); "
+                    "re-bootstrapping",
+                    saved,
+                    saved_uv,
+                    self.uidvalidity,
+                    saved_mode,
+                )
+        uids = await self._search_uids("1:*")
         self.last_uid = max((int(u) for u in uids), default=0)
         log.info("bootstrapped, starting from UID %s", self.last_uid + 1)
         if self.store is not None:
             self.store.set_meta("last_uid", str(self.last_uid))
+            self.store.set_meta("uid_mode", "1")
+            if self.uidvalidity is not None:
+                self.store.set_meta("uidvalidity", str(self.uidvalidity))
+
+    def _watermark_valid(self, saved_uv: str | None) -> bool:
+        """A saved watermark is only valid within the same UIDVALIDITY."""
+        if self.uidvalidity is None:
+            return True  # server did not report UIDVALIDITY: keep old behaviour
+        if saved_uv is None:
+            return False
+        try:
+            return int(saved_uv) == self.uidvalidity
+        except ValueError:
+            return False
 
     async def _search_uids(self, *criteria: str) -> list[str]:
-        # NOTE: aioimaplib 2.x rejects "UID SEARCH", so SEARCH with an explicit
-        # UID criterion is used (it returns UIDs, not sequence numbers).
+        # UID SEARCH is required: some servers (e.g. mail.ru) answer a plain
+        # SEARCH with sequence numbers even when a UID criterion is given.
         assert self.client is not None
-        resp = await self.client.search(*criteria)
+        resp = await self.client.uid_search(*criteria)
         text = b" ".join(
             line for line in resp.lines if isinstance(line, bytes)
         ).decode(errors="replace")
@@ -164,7 +214,7 @@ class ImapClient:
     # -- processing ------------------------------------------------------------
 
     async def _process_new(self, handler: Handler) -> None:
-        uids = await self._search_uids("UID", f"{self.last_uid + 1}:*")
+        uids = await self._search_uids(f"{self.last_uid + 1}:*")
         for uid in sorted(int(u) for u in uids):
             if uid <= self.last_uid:
                 continue
