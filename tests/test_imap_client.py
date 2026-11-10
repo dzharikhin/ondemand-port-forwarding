@@ -82,8 +82,17 @@ async def test_select_failure_raises(cfg, fake_imap):
 
 
 async def test_configured_mailbox_is_selected(cfg, fake_imap):
-    cfg.imap_mailbox = "INBOX/ToMyself"
-    client = ImapClient(cfg)
+    client = ImapClient(cfg, mailbox="INBOX/ToMyself")
+
+    await client._ensure_connected()
+
+    assert fake_imap.selected_mailbox == ["INBOX/ToMyself"]
+    assert client.mailbox == "INBOX/ToMyself"
+
+
+async def test_defaults_to_first_configured_mailbox(cfg, fake_imap):
+    cfg.imap_mailboxes = ["INBOX/ToMyself", "INBOX"]
+    client = ImapClient(cfg, store=None)
 
     await client._ensure_connected()
 
@@ -91,6 +100,19 @@ async def test_configured_mailbox_is_selected(cfg, fake_imap):
 
 
 async def test_bootstrap_restores_matching_watermark(cfg, fake_imap, store):
+    store.set_meta("last_uid:INBOX", "139852")
+    store.set_meta("uidvalidity:INBOX", "111")
+    store.set_meta("uid_mode:INBOX", "1")
+    client = ImapClient(cfg, store)
+
+    await client._ensure_connected()
+    await client._bootstrap_last_uid()
+
+    assert client.last_uid == 139852
+
+
+async def test_bootstrap_migrates_legacy_watermark(cfg, fake_imap, store):
+    # single-mailbox build wrote unscoped keys
     store.set_meta("last_uid", "139852")
     store.set_meta("uidvalidity", "111")
     store.set_meta("uid_mode", "1")
@@ -100,26 +122,48 @@ async def test_bootstrap_restores_matching_watermark(cfg, fake_imap, store):
     await client._bootstrap_last_uid()
 
     assert client.last_uid == 139852
+    assert store.get_meta("last_uid:INBOX") == "139852"
+    assert store.get_meta("uidvalidity:INBOX") == "111"
+    # legacy keys are consumed: no other mailbox can adopt them
+    assert store.get_meta("last_uid") is None
+    assert store.get_meta("uidvalidity") is None
+    assert store.get_meta("uid_mode") is None
+
+
+async def test_watermarks_are_per_mailbox(cfg, fake_imap, store):
+    store.set_meta("last_uid:INBOX", "139852")
+    store.set_meta("uidvalidity:INBOX", "111")
+    store.set_meta("uid_mode:INBOX", "1")
+    client = ImapClient(cfg, store, mailbox="INBOX/ToMyself")
+
+    await client._ensure_connected()
+    await client._bootstrap_last_uid()
+
+    # no scoped watermark for this mailbox: bootstraps fresh from search and
+    # does not touch INBOX's keys
+    assert client.last_uid == 139852
+    assert store.get_meta("last_uid:INBOX") == "139852"
+    assert store.get_meta("last_uid:INBOX/ToMyself") == "139852"
 
 
 async def test_bootstrap_resets_stale_watermark(cfg, fake_imap, store):
     # legacy store: watermark saved without uidvalidity (or from another mailbox)
-    store.set_meta("last_uid", "16433")
+    store.set_meta("last_uid:INBOX", "16433")
     client = ImapClient(cfg, store)
 
     await client._ensure_connected()
     await client._bootstrap_last_uid()
 
     assert client.last_uid == 139852  # re-bootstrapped from search, not 16433
-    assert store.get_meta("uidvalidity") == "111"
-    assert store.get_meta("uid_mode") == "1"
-    assert store.get_meta("last_uid") == "139852"
+    assert store.get_meta("uidvalidity:INBOX") == "111"
+    assert store.get_meta("uid_mode:INBOX") == "1"
+    assert store.get_meta("last_uid:INBOX") == "139852"
 
 
 async def test_bootstrap_resets_on_uidvalidity_change(cfg, fake_imap, store):
-    store.set_meta("last_uid", "100")
-    store.set_meta("uidvalidity", "999")  # server rebuilt the mailbox
-    store.set_meta("uid_mode", "1")
+    store.set_meta("last_uid:INBOX", "100")
+    store.set_meta("uidvalidity:INBOX", "999")  # server rebuilt the mailbox
+    store.set_meta("uid_mode:INBOX", "1")
     client = ImapClient(cfg, store)
 
     await client._ensure_connected()
@@ -130,8 +174,8 @@ async def test_bootstrap_resets_on_uidvalidity_change(cfg, fake_imap, store):
 
 async def test_bootstrap_resets_sequence_number_watermark(cfg, fake_imap, store):
     # written by a build whose SEARCH returned sequence numbers: no uid_mode
-    store.set_meta("last_uid", "13017")
-    store.set_meta("uidvalidity", "111")  # matching uidvalidity is not enough
+    store.set_meta("last_uid:INBOX", "13017")
+    store.set_meta("uidvalidity:INBOX", "111")  # matching uidvalidity is not enough
     client = ImapClient(cfg, store)
 
     await client._ensure_connected()

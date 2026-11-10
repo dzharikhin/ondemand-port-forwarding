@@ -20,7 +20,16 @@ def test_defaults():
     assert cfg.ttl_default == 1800 and cfg.retries == 3
     assert cfg.plaintext_code == ""
     assert cfg.data_dir == "./data"
-    assert cfg.imap_mailbox == "INBOX"
+    assert cfg.imap_mailboxes == ["INBOX"]
+
+
+def test_mailbox_list():
+    cfg = Config.from_env({
+        "IMAP_HOST": "i", "IMAP_USER": "u", "IMAP_PASSWORD": "p",
+        "SMTP_HOST": "s", "SECRET": "x",
+        "IMAP_MAILBOX": "INBOX, INBOX/ToMyself ,INBOX",
+    })
+    assert cfg.imap_mailboxes == ["INBOX", "INBOX/ToMyself"]
 
 
 def test_mailbox_override():
@@ -28,7 +37,7 @@ def test_mailbox_override():
         "IMAP_HOST": "i", "IMAP_USER": "u", "IMAP_PASSWORD": "p",
         "SMTP_HOST": "s", "SECRET": "x", "IMAP_MAILBOX": "INBOX/ToMyself",
     })
-    assert cfg.imap_mailbox == "INBOX/ToMyself"
+    assert cfg.imap_mailboxes == ["INBOX/ToMyself"]
 
 
 def test_bad_int():

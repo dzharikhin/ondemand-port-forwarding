@@ -68,9 +68,18 @@ def _uidvalidity_from_response(resp) -> int | None:
 
 
 class ImapClient:
-    def __init__(self, cfg: Config, store: Store | None = None) -> None:
+    """Watcher for a single mailbox; run one instance per watched mailbox.
+
+    UID sequences are per-mailbox, so every instance keeps its own watermark
+    under mailbox-scoped store keys, and reports uids to the handler as
+    ``<mailbox>:<uid>`` so audit/dedup entries from different mailboxes
+    never collide.
+    """
+
+    def __init__(self, cfg: Config, store: Store | None = None, mailbox: str | None = None) -> None:
         self.cfg = cfg
         self.store = store
+        self.mailbox = mailbox or cfg.imap_mailboxes[0]
         self.client: aioimaplib.IMAP4 | None = None
         self.last_uid = 0
         self.uidvalidity: int | None = None
@@ -85,7 +94,9 @@ class ImapClient:
             except asyncio.CancelledError:
                 raise
             except Exception:  # noqa: BLE001 - reconnect on any mail failure
-                log.exception("imap error, reconnecting in %ss", self.cfg.poll_interval)
+                log.exception(
+                    "imap error on %s, reconnecting in %ss", self.mailbox, self.cfg.poll_interval
+                )
                 await self._close()
                 await asyncio.sleep(self.cfg.poll_interval)
 
@@ -108,11 +119,11 @@ class ImapClient:
                 f"IMAP login rejected for {self.cfg.imap_user} on {self.cfg.imap_host}: "
                 f"{_server_error(resp)}"
             )
-        resp = await c.select(self.cfg.imap_mailbox)
+        resp = await c.select(self.mailbox)
         if resp.result != "OK":
             await self._quiet_logout(c)
             raise ImapError(
-                f"IMAP SELECT {self.cfg.imap_mailbox} failed on {self.cfg.imap_host}: "
+                f"IMAP SELECT {self.mailbox} failed on {self.cfg.imap_host}: "
                 f"{_server_error(resp)}"
             )
         self.client = c
@@ -121,7 +132,7 @@ class ImapClient:
             "connected to %s as %s (mailbox %s)",
             self.cfg.imap_host,
             self.cfg.imap_user,
-            self.cfg.imap_mailbox,
+            self.mailbox,
         )
 
     async def _quiet_logout(self, c: aioimaplib.IMAP4) -> None:
@@ -140,40 +151,61 @@ class ImapClient:
 
     # -- uid bookkeeping ------------------------------------------------------
 
+    def _key(self, name: str) -> str:
+        """Store meta keys are mailbox-scoped: UIDs are per-mailbox."""
+        return f"{name}:{self.mailbox}"
+
     async def _bootstrap_last_uid(self) -> None:
         """Skip mail that predates the first start; persist the watermark."""
         if self.last_uid > 0:
             return
+        migrated = False
+        saved = saved_uv = saved_mode = None
         if self.store is not None:
-            saved = self.store.get_meta("last_uid")
-            saved_uv = self.store.get_meta("uidvalidity")
-            saved_mode = self.store.get_meta("uid_mode")
-            if (
-                saved is not None
-                and saved_mode == "1"
-                and self._watermark_valid(saved_uv)
-            ):
-                self.last_uid = int(saved)
-                log.info("restored watermark from store: UID %s", self.last_uid)
-                return
+            saved = self.store.get_meta(self._key("last_uid"))
+            saved_uv = self.store.get_meta(self._key("uidvalidity"))
+            saved_mode = self.store.get_meta(self._key("uid_mode"))
+            if saved is None:
+                # Migrate the legacy single-mailbox watermark (uidvalidity
+                # only matches for the mailbox it was written for), then
+                # remove it so other mailboxes cannot adopt it too.
+                legacy = self.store.get_meta("last_uid")
+                legacy_uv = self.store.get_meta("uidvalidity")
+                if legacy is not None and self._watermark_valid(legacy_uv):
+                    saved, saved_uv, saved_mode = (
+                        legacy,
+                        legacy_uv,
+                        self.store.get_meta("uid_mode"),
+                    )
+                    migrated = True
+
+        if saved is not None and saved_mode == "1" and self._watermark_valid(saved_uv):
+            self.last_uid = int(saved)
+            log.info("restored watermark for %s: UID %s", self.mailbox, self.last_uid)
+        else:
             if saved is not None:
                 log.warning(
-                    "stored watermark UID %s is not valid for this mailbox "
+                    "stored watermark UID %s for %s is not valid for this mailbox "
                     "(uidvalidity stored=%s current=%s, uid_mode=%s); "
                     "re-bootstrapping",
                     saved,
+                    self.mailbox,
                     saved_uv,
                     self.uidvalidity,
                     saved_mode,
                 )
-        uids = await self._search_uids("1:*")
-        self.last_uid = max((int(u) for u in uids), default=0)
-        log.info("bootstrapped, starting from UID %s", self.last_uid + 1)
+            uids = await self._search_uids("1:*")
+            self.last_uid = max((int(u) for u in uids), default=0)
+            log.info("bootstrapped %s, starting from UID %s", self.mailbox, self.last_uid + 1)
+
         if self.store is not None:
-            self.store.set_meta("last_uid", str(self.last_uid))
-            self.store.set_meta("uid_mode", "1")
+            self.store.set_meta(self._key("last_uid"), str(self.last_uid))
+            self.store.set_meta(self._key("uid_mode"), "1")
             if self.uidvalidity is not None:
-                self.store.set_meta("uidvalidity", str(self.uidvalidity))
+                self.store.set_meta(self._key("uidvalidity"), str(self.uidvalidity))
+            if migrated:
+                for legacy_key in ("last_uid", "uidvalidity", "uid_mode"):
+                    self.store.del_meta(legacy_key)
 
     def _watermark_valid(self, saved_uv: str | None) -> bool:
         """A saved watermark is only valid within the same UIDVALIDITY."""
@@ -219,24 +251,25 @@ class ImapClient:
             if uid <= self.last_uid:
                 continue
             self.last_uid = uid
+            label = f"{self.mailbox}:{uid}"
             try:
                 msg = await self._fetch(str(uid))
             except Exception:  # noqa: BLE001
-                log.exception("failed to fetch UID %s, skipping", uid)
+                log.exception("failed to fetch UID %s in %s, skipping", uid, self.mailbox)
                 continue
             if msg is None:
                 continue
             try:
-                await handler(str(uid), msg)
+                await handler(label, msg)
             except Exception:  # noqa: BLE001
-                log.exception("handler failed for UID %s", uid)
+                log.exception("handler failed for UID %s", label)
             if self.store is not None:
-                self.store.set_meta("last_uid", str(uid))
+                self.store.set_meta(self._key("last_uid"), str(uid))
             try:
                 assert self.client is not None
                 await self.client.uid("STORE", str(uid), "+FLAGS", "(\\Seen)")
             except Exception:  # noqa: BLE001
-                log.warning("could not mark UID %s as seen", uid)
+                log.warning("could not mark UID %s as seen", label)
 
     async def _wait_for_mail(self) -> None:
         """IDLE with poll fallback on providers that don't support it."""

@@ -98,25 +98,30 @@ async def run_daemon() -> None:
     validator = Validator(cfg, store)
     manager = SessionManager(cfg, store)
     notifier = Notifier(cfg)
-    imap = ImapClient(cfg, store)
+
+    handler = make_handler(cfg, store, validator, manager, notifier)
+    clients = [ImapClient(cfg, store, mb) for mb in cfg.imap_mailboxes]
 
     stop = asyncio.Event()
     loop = asyncio.get_running_loop()
     for sig in (signal.SIGINT, signal.SIGTERM):
         loop.add_signal_handler(sig, stop.set)
 
-    watcher = asyncio.create_task(imap.run(make_handler(cfg, store, validator, manager, notifier)))
+    watchers = [asyncio.create_task(c.run(handler), name=f"imap-{c.mailbox}") for c in clients]
     stop_waiter = asyncio.create_task(stop.wait())
 
     done, _ = await asyncio.wait(
-        {watcher, stop_waiter}, return_when=asyncio.FIRST_COMPLETED
+        [*watchers, stop_waiter], return_when=asyncio.FIRST_COMPLETED
     )
-    if watcher in done and watcher.exception() is not None:
-        log.error("imap loop crashed: %r", watcher.exception())
-    else:
+    crashed = [t for t in watchers if t.done() and t.exception() is not None]
+    for t in crashed:
+        log.error("imap loop crashed: %r", t.exception())
+    if not crashed:
         log.info("shutdown requested")
 
-    watcher.cancel()
-    await imap.stop()
+    for t in watchers:
+        t.cancel()
+    for c in clients:
+        await c.stop()
     await manager.shutdown()
     store.close()

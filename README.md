@@ -8,7 +8,7 @@ email with connection details or error logs.
 
 ## How it works
 
-1. Daemon polls the mailbox (IMAP IDLE, poll fallback).
+1. Daemon polls the mailbox(es) (IMAP IDLE, poll fallback).
 2. A letter arrives in one of two forms:
    - **Encrypted** (normal): body is a GPG symmetric `-----BEGIN PGP MESSAGE-----`
      block, encrypted with your shared passphrase (`SECRET`).
@@ -104,9 +104,14 @@ Useful optional: `SMTP_USER`/`SMTP_PASSWORD` (default = IMAP creds),
 `PLAINTEXT_CODE` (initial one-time code), `STRICT_HEADERS=1` (require
 spf/dkim pass).
 
-> **mail.ru users:** the provider auto-sorts mail you send to yourself into
-> the `INBOX/ToMyself` subfolder — the daemon never sees it in plain `INBOX`.
-> Set `IMAP_MAILBOX=INBOX/ToMyself` in `.env`.
+`IMAP_MAILBOX` lists the folders to watch, comma-separated (one IDLE
+connection each). Watch several when letters land in different folders —
+e.g. mail.ru sorts self-sent mail into a subfolder while mail from others
+goes to `INBOX`:
+
+```ini
+IMAP_MAILBOX=INBOX,INBOX/ToMyself
+```
 
 ## Launch (always-on)
 
@@ -242,10 +247,10 @@ like this:
 - All status replies (success and failure) always go to `IMAP_USER`, no
   matter who sent the letter — a random sender gets no feedback.
 
-- The letter must land in the watched mailbox (`IMAP_MAILBOX`, default
-  `INBOX`). Providers that auto-sort self-sent mail into a subfolder (e.g.
-  mail.ru → `INBOX/ToMyself`) will hide it from the daemon — set
-  `IMAP_MAILBOX` accordingly (see Configure).
+- The letter must land in one of the watched mailboxes (`IMAP_MAILBOX`,
+  default `INBOX`). Providers that auto-sort self-sent mail into a subfolder
+  (e.g. mail.ru → `INBOX/ToMyself`) will hide it from the daemon — add that
+  folder to `IMAP_MAILBOX` (see Configure).
 
 - Paste the block as **plain text, not HTML** (switch your mail client to
   plain-text composing; HTML mode can mangle the base64 with soft line breaks

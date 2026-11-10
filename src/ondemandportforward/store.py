@@ -126,6 +126,11 @@ class Store:
         self._imap["meta"][key] = value
         self._save_json(IMAP_FILE, self._imap)
 
+    def del_meta(self, key: str) -> None:
+        if key in self._imap["meta"]:
+            del self._imap["meta"][key]
+            self._save_json(IMAP_FILE, self._imap)
+
     # -- replay cache -----------------------------------------------------------
 
     def replay_seen(self, body_hash: str) -> bool:

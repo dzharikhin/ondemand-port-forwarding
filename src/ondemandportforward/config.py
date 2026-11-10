@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 
 class ConfigError(Exception):
@@ -18,7 +18,7 @@ class Config:
 
     imap_port: int = 993
     imap_tls: bool = True
-    imap_mailbox: str = "INBOX"
+    imap_mailboxes: list[str] = field(default_factory=lambda: ["INBOX"])
     smtp_port: int = 465
     smtp_user: str = ""
     smtp_password: str = ""
@@ -58,6 +58,14 @@ class Config:
         def opt_bool(name: str) -> bool:
             return e.get(name, "").strip().lower() in ("1", "true", "yes")
 
+        def opt_mailboxes(name: str) -> list[str]:
+            boxes: list[str] = []
+            for chunk in e.get(name, "").split(","):
+                chunk = chunk.strip()
+                if chunk and chunk not in boxes:
+                    boxes.append(chunk)
+            return boxes or ["INBOX"]
+
         return cls(
             imap_host=req("IMAP_HOST"),
             imap_user=req("IMAP_USER"),
@@ -66,7 +74,7 @@ class Config:
             secret=req("SECRET"),
             imap_port=opt_int("IMAP_PORT", 993),
             imap_tls=not opt_bool("IMAP_TLS_OFF"),
-            imap_mailbox=e.get("IMAP_MAILBOX", "").strip() or "INBOX",
+            imap_mailboxes=opt_mailboxes("IMAP_MAILBOX"),
             smtp_port=opt_int("SMTP_PORT", 465),
             smtp_user=e.get("SMTP_USER", "").strip(),
             smtp_password=e.get("SMTP_PASSWORD", ""),
