@@ -6,6 +6,12 @@ services:
     env_file: .env
     environment:
       DATA_DIR: /data
+      # secrets: typed-in shell input wins over .env (see README); when not
+      # provided inline, resolves from the .env file
+      IMAP_PASSWORD: ${IMAP_PASSWORD:-}
+      SECRET: ${SECRET:-}
+      SMTP_PASSWORD: ${SMTP_PASSWORD:-}
+      PLAINTEXT_CODE: ${PLAINTEXT_CODE:-}
     volumes:
       - ./data:/data
     restart: unless-stopped

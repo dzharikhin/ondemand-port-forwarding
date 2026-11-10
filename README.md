@@ -118,6 +118,48 @@ docker compose up -d
 docker compose logs -f
 ```
 
+### Launch with secrets typed in
+
+To keep secrets off disk entirely (no `IMAP_PASSWORD`/`SECRET`/
+`SMTP_PASSWORD`/`PLAINTEXT_CODE` in `.env`), type them in when launching —
+each `read -rsp` prompts hidden (no echo), and the value is consumed inline:
+never written to disk, shell history, or `.env`:
+
+```bash
+IMAP_PASSWORD=$(read -rsp "IMAP password: " p && echo "$p") \
+SECRET=$(read -rsp "GPG passphrase (SECRET): " p && echo "$p") \
+PLAINTEXT_CODE=$(read -rsp "Initial one-time code (Enter to skip): " p && echo "$p") \
+docker compose up -d
+```
+
+Notes:
+
+- Typed-in values override `.env` (compose `environment:` beats `env_file:`);
+  delete these vars from `.env` so nothing sensitive sits on disk.
+- `PLAINTEXT_CODE` seeds a code only when none is armed yet — Enter to skip is
+  fine. Re-arm later with `set-code` (preferred anyway).
+- Secrets live only in the container's environment: after `docker compose
+  down` (or a reboot that recreates the container) you must type them again.
+  That's the tradeoff vs. keeping them in `.env`.
+- Docker needs `sudo`? Don't write `sudo IMAP_PASSWORD=... docker compose ...`
+  — sudo's `env_reset` silently strips the inline assignments. Wrap with
+  `env`, which sets them after sudo's environment reset:
+
+  ```bash
+  sudo env \
+    IMAP_PASSWORD=$(read -rsp "IMAP password: " p && echo "$p") \
+    SECRET=$(read -rsp "GPG passphrase (SECRET): " p && echo "$p") \
+    docker compose up -d
+  ```
+
+- Any other compose command that needs a secret takes the same inline prefix,
+  e.g. encrypting a letter when `SECRET` is not in `.env`:
+
+  ```bash
+  SECRET=$(read -rsp "GPG passphrase (SECRET): " p && echo "$p") \
+  docker compose run --rm ondemandportforward encrypt
+  ```
+
 Equivalent plain `docker run`:
 
 ```bash
