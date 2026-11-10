@@ -25,36 +25,31 @@ def make_handler(
         store.mark_email_seen(uid)
 
         sender = str(msg.get("From", ""))
-        to = parseaddr(sender)[1] or cfg.mail_from
+        sender_addr = parseaddr(sender)[1] or "unknown"
 
         # Never react to our own replies (would create a reply loop).
         subject = str(msg.get("Subject", ""))
         if subject.replace("Re:", "").lstrip().startswith("[ondemandportforward]"):
             log.info("UID %s: own reply, ignored", uid)
             store.log_attempt(
-                imap_uid=uid, sender=to, mode="unknown",
+                imap_uid=uid, sender=sender_addr, mode="unknown",
                 outcome="ignored", reason="own_reply",
             )
             return
 
         auth_results = str(msg.get("Authentication-Results") or "")
         body = extract_body(msg)
-        log.info("processing UID %s from %s (%d chars)", uid, to, len(body))
+        log.info("processing UID %s from %s (%d chars)", uid, sender_addr, len(body))
 
-        verdict = await validator.check(sender, body, auth_results)
+        # Sender is not validated; status replies always go to the owner.
+        to = cfg.imap_user
 
-        if verdict.reason == "bad_sender":
-            log.warning("UID %s: sender mismatch, silently ignored", uid)
-            store.log_attempt(
-                imap_uid=uid, sender=to, mode=verdict.mode,
-                outcome="ignored", reason=verdict.reason,
-            )
-            return
+        verdict = await validator.check(body, auth_results)
 
         if not verdict.accepted:
             log.warning("UID %s rejected: %s", uid, verdict.reason)
             store.log_attempt(
-                imap_uid=uid, sender=to, mode=verdict.mode,
+                imap_uid=uid, sender=sender_addr, mode=verdict.mode,
                 outcome="rejected", reason=verdict.reason,
             )
             try:
@@ -66,7 +61,7 @@ def make_handler(
         session = manager.start(verdict.command)
         log.info("UID %s accepted -> session %s", uid, session.id)
         store.log_attempt(
-            imap_uid=uid, sender=to, mode=verdict.mode,
+            imap_uid=uid, sender=sender_addr, mode=verdict.mode,
             outcome="accepted", session_id=session.id,
         )
 

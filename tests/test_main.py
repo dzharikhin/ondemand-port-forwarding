@@ -55,13 +55,23 @@ async def test_encrypted_email_end_to_end(cfg, harness):
     await manager.shutdown()
 
 
-async def test_bad_sender_is_silent(cfg, harness):
+async def test_any_sender_replies_to_imap_user(cfg, harness):
     handler, store, manager, notifier = harness
-    body = gpg.encrypt("host: 1.2.3.4\nuser: root\npassword: pw\n", SECRET)
+    body = gpg.encrypt("host: 1.2.3.4\nuser: root\npassword: pw\nttl: 300\n", SECRET)
     await handler("10", make_email("attacker@evil.com", body))
 
-    assert notifier.sent == []
-    assert store.recent_attempts()[0]["outcome"] == "ignored"
+    assert notifier.sent and notifier.sent[0][0] == "success"
+    assert notifier.sent[0][1] == cfg.imap_user  # reply always to the owner
+    assert store.recent_attempts()[0]["sender"] == "attacker@evil.com"
+    await manager.shutdown()
+
+
+async def test_rejection_replies_to_imap_user(cfg, harness):
+    handler, store, manager, notifier = harness
+    await handler("11", make_email("attacker@evil.com", "hello there"))
+
+    assert notifier.sent and notifier.sent[0][0] == "failure"
+    assert notifier.sent[0][1] == cfg.imap_user
     await manager.shutdown()
 
 

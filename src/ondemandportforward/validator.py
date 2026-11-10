@@ -3,7 +3,6 @@ from __future__ import annotations
 import asyncio
 import hmac
 from dataclasses import dataclass
-from email.utils import parseaddr
 
 from . import gpg
 from .config import Config
@@ -27,11 +26,6 @@ def _reject(mode: str, reason: str) -> Verdict:
     return Verdict(accepted=False, mode=mode, reason=reason)
 
 
-def _sender_ok(cfg: Config, sender: str) -> bool:
-    addr = parseaddr(sender)[1].strip().lower()
-    return addr == cfg.imap_user_lower
-
-
 def _headers_ok(auth_results: str | None) -> bool:
     if not auth_results:
         return False
@@ -44,10 +38,7 @@ class Validator:
         self.cfg = cfg
         self.store = store
 
-    async def check(self, sender: str, body_text: str, auth_results: str | None = None) -> Verdict:
-        if not _sender_ok(self.cfg, sender):
-            return _reject(MODE_UNKNOWN, "bad_sender")
-
+    async def check(self, body_text: str, auth_results: str | None = None) -> Verdict:
         if self.cfg.strict_headers and not _headers_ok(auth_results):
             return _reject(MODE_UNKNOWN, "bad_headers")
 

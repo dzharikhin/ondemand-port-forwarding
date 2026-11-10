@@ -234,10 +234,13 @@ like this:
 
 | Part | Requirement |
 |---|---|
-| From | your own address (`IMAP_USER`); anything else is rejected as `bad_sender` |
-| To | your own address |
-| Subject | ignored |
+| From | anything — sender is not checked; the letter itself (SECRET / one-time code) is the authentication |
+| To | your own address (the letter must land in the watched mailbox) |
+| Subject | ignored (but replies from the daemon are prefixed `[ondemandportforward]` and never re-processed) |
 | Body | the full `-----BEGIN PGP MESSAGE-----` ... `-----END PGP MESSAGE-----` block from `body.txt.asc` |
+
+- All status replies (success and failure) always go to `IMAP_USER`, no
+  matter who sent the letter — a random sender gets no feedback.
 
 - The letter must land in the watched mailbox (`IMAP_MAILBOX`, default
   `INBOX`). Providers that auto-sort self-sent mail into a subfolder (e.g.
@@ -286,7 +289,8 @@ docker compose exec ondemandportforward tail -20 /data/sessions.jsonl
 
 - `SECRET` (gpg) provides confidentiality + authenticity: providers see only
   ciphertext, forged letters can't decrypt. Exact resends are rejected by the
-  replay cache.
+  replay cache. The From header is never trusted — anyone may send a letter,
+  only a valid one has any effect.
 - One-time plaintext codes burn on use; live ssh passwords never appear in
   logs or replies.
 - Choose a long `SECRET` and keep `/data` backed up — it holds the armed code

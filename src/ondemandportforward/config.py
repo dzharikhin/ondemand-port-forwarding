@@ -37,7 +37,6 @@ class Config:
         self.smtp_user = self.smtp_user or self.imap_user
         self.smtp_password = self.smtp_password or self.imap_password
         self.mail_from = self.mail_from or self.smtp_user
-        self.imap_user_lower = self.imap_user.strip().lower()
 
     @classmethod
     def from_env(cls, env: dict[str, str] | None = None) -> Config:
