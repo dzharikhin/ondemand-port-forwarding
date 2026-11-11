@@ -1,10 +1,86 @@
 # ondemandportforward
 
-On-demand reverse SSH tunnels triggered by email. A containerized daemon watches
-an IMAP mailbox; a properly authenticated "command letter" makes it open a
-reverse SSH tunnel (`ssh -R`) to the host named in the letter, so a remote
-machine can reach services on your internal network. The daemon replies by
+On-demand reverse SSH tunnels triggered by email: a containerized daemon
+watches an IMAP mailbox, and a properly authenticated "command letter" makes
+it open a reverse SSH tunnel (`ssh -R`) to the host named in the letter — so
+a remote machine can reach services on your internal network — replying by
 email with connection details or error logs.
+
+## Quick start
+
+### 1. Configure
+
+```bash
+cp .env.example .env
+vi .env
+```
+
+Required (everything else has defaults):
+
+```ini
+IMAP_HOST=imap.example.com
+IMAP_USER=user@example.com
+IMAP_PASSWORD=...
+SMTP_HOST=smtp.example.com
+SECRET=long-random-passphrase   # gpg passphrase for command letters
+```
+
+### 2. Launch
+
+```bash
+docker compose up -d
+docker compose logs -f
+```
+
+Compose builds the image automatically; `restart: unless-stopped` and a
+healthcheck are configured, so the container comes back on reboot/crash.
+
+### 3. Send a command letter
+
+Interactive helper builds and encrypts the letter for you:
+
+```bash
+docker compose run --rm ondemandportforward encrypt
+```
+
+Or manually, on any machine with gpg (symmetric, passphrase = `SECRET`):
+
+```bash
+cat > body.txt <<EOF
+host: 203.0.113.10
+user: root
+password: hunter2
+forwards: 2222:22
+ttl: 1800
+EOF
+gpg -a -c --cipher-algo AES256 body.txt   # writes body.txt.asc
+```
+
+Email the full `-----BEGIN PGP MESSAGE-----` ... `-----END PGP MESSAGE-----`
+block as **plain text** to your own address — full rules in
+[Email format](#email-format).
+
+### 4. Connect
+
+With the default forward `2222:22`, once the tunnel is up, port `2222` on the
+letter's `host` (the mediator) leads back to the sshd of the machine the
+daemon runs on (or to whatever `host:port` you named in `forwards:` — the
+connect commands stay the same). Two ways in:
+
+Direct — on the mediator itself:
+
+```bash
+ssh -p 2222 <your-user-on-daemon-machine>@localhost
+```
+
+Intermediate — from anywhere else, using the mediator as a jump host
+(one command):
+
+```bash
+ssh -J <letter-user>@<letter-host> -p 2222 <your-user-on-daemon-machine>@localhost
+```
+
+(`your-user` is an account on the daemon machine — not the letter's ssh user.)
 
 ## How it works
 
@@ -19,7 +95,7 @@ email with connection details or error logs.
 4. Reply email: success (connect instructions) or failure (last log lines).
    Replies are prefixed `[ondemandportforward]` and never re-processed.
 
-Letter body fields:
+### Letter body fields
 
 | Field | Required | Default | Meaning |
 |---|---|---|---|
@@ -54,73 +130,89 @@ target position (colons conflict with the syntax).
 See [State and logs](#state-and-logs) for the podman-compose host-networking
 caveat that makes the `host:port` form the safe default.
 
-## Connecting through the tunnel
+### Email format
 
-With the default forward `2222:22`, once the tunnel is up, port `2222` on the
-letter's `host` (the mediator) leads back to the sshd of the machine the
-daemon runs on (or to whatever `host:port` you named in `forwards:` — the
-connect commands stay the same). Two ways in:
+Paste the ciphertext into the message body. The email must look like this:
 
-On the mediator itself:
+| Part | Requirement |
+|---|---|
+| From | anything — sender is not checked; the letter itself (SECRET / one-time code) is the authentication |
+| To | your own address (the letter must land in the watched mailbox) |
+| Subject | ignored (but replies from the daemon are prefixed `[ondemandportforward]` and never re-processed) |
+| Body | the full `-----BEGIN PGP MESSAGE-----` ... `-----END PGP MESSAGE-----` block from `body.txt.asc` |
+
+- All status replies (success and failure) always go to `IMAP_USER`, no
+  matter who sent the letter — a random sender gets no feedback.
+
+- The letter must land in one of the watched mailboxes (`IMAP_MAILBOX`,
+  default `INBOX`). Providers that auto-sort self-sent mail into a subfolder
+  (e.g. mail.ru → `INBOX/ToMyself`) will hide it from the daemon — add that
+  folder to `IMAP_MAILBOX` (see [Configuration](#configuration)).
+
+- Paste the block as **plain text, not HTML** (switch your mail client to
+  plain-text composing; HTML mode can mangle the base64 with soft line breaks
+  or NBSP and decryption fails).
+- Text before or after the block is ignored — the first PGP block in the body
+  wins.
+- No `code:` line in this mode; that field is plaintext-fallback only.
+
+Rules to remember:
+
+- **Symmetric** encryption with the `SECRET` passphrase — not public-key.
+- Every ciphertext is **single-use**: the replay cache burns the block on the
+  first attempt, even a failed one (e.g. wrong `SECRET`, corrupted paste).
+  Never resend the same block — re-encrypt; a fresh encryption of the same
+  plaintext is new ciphertext and works.
+
+### Plaintext fallback (one-time code)
+
+Arm a code first (hidden prompt; old codes die, `--clear` disables the mode):
 
 ```bash
-ssh -p 2222 <your-user-on-daemon-machine>@localhost
+docker compose run --rm ondemandportforward set-code
 ```
 
-From anywhere else, using the mediator as a jump host (one command):
+Then email a plain `key: value` body plus `code: <the-code>`. The code burns
+at acceptance — even a typo burns it; arm a new one to retry. A `code already
+used` reply is also the tamper alarm: something reused your code before you did.
+Rotate the remote machine's password after using this mode (the letter was
+readable to the mail provider).
 
-```bash
-ssh -J <letter-user>@<letter-host> -p 2222 <your-user-on-daemon-machine>@localhost
-```
+## Configuration
 
-(`your-user` is an account on the daemon machine — not the letter's ssh user.)
+### Environment variables
 
-## Build the image
+| Variable | Default | Meaning |
+|---|---|---|
+| `IMAP_HOST` | — required | IMAP server of the watched mailbox |
+| `IMAP_USER` | — required | mailbox login; replies always go to this address |
+| `IMAP_PASSWORD` | — required | IMAP password |
+| `SMTP_HOST` | — required | SMTP server for replies |
+| `SECRET` | — required | gpg passphrase for command letters |
+| `IMAP_PORT` | `993` | IMAP port |
+| `IMAP_TLS_OFF` | unset | set `1` to disable IMAP TLS |
+| `IMAP_MAILBOX` | `INBOX` | folders to watch, comma-separated (one IDLE connection each) |
+| `SMTP_PORT` | `465` | SMTP port |
+| `SMTP_USER` | `IMAP_USER` | SMTP login |
+| `SMTP_PASSWORD` | `IMAP_PASSWORD` | SMTP password |
+| `MAIL_FROM` | `SMTP_USER` | From address on replies |
+| `PLAINTEXT_CODE` | — | initial one-time code (only applies if none armed yet; prefer `set-code`) |
+| `TTL_DEFAULT` | `1800` | default tunnel TTL, seconds |
+| `RETRIES` | `3` | extra ssh connect attempts after the first |
+| `LOG_RETENTION_DAYS` | `90` | days to keep the state logs |
+| `STRICT_HEADERS` | `0` | `1` = require spf/dkim pass |
+| `POLL_INTERVAL` | `60` | seconds between IMAP poll-fallback cycles and reconnects |
+| `CONNECT_GRACE` | `10` | seconds to wait for ssh to fail before declaring the tunnel up |
+| `DATA_DIR` | `./data` | state directory (compose mounts `/data`) |
 
-```bash
-docker build -t ondemandportforward:latest .
-# or via compose:
-docker compose build
-```
+### Watching multiple mailboxes
 
-## Configure
-
-```bash
-cp .env.example .env
-vi .env
-```
-
-Required (everything else has defaults):
-
-```ini
-IMAP_HOST=imap.example.com
-IMAP_USER=user@example.com
-IMAP_PASSWORD=...
-SMTP_HOST=smtp.example.com
-SECRET=long-random-passphrase   # gpg passphrase for command letters
-```
-
-Useful optional: `SMTP_USER`/`SMTP_PASSWORD` (default = IMAP creds),
-`PLAINTEXT_CODE` (initial one-time code), `STRICT_HEADERS=1` (require
-spf/dkim pass).
-
-`IMAP_MAILBOX` lists the folders to watch, comma-separated (one IDLE
-connection each). Watch several when letters land in different folders —
-e.g. mail.ru sorts self-sent mail into a subfolder while mail from others
-goes to `INBOX`:
+`IMAP_MAILBOX` lists the folders to watch. Watch several when letters land in
+different folders — e.g. mail.ru sorts self-sent mail into a subfolder while
+mail from others goes to `INBOX`:
 
 ```ini
 IMAP_MAILBOX=INBOX,INBOX/ToMyself
-```
-
-## Launch (always-on)
-
-Recommended — compose (`restart: unless-stopped` + healthcheck are configured,
-container comes back on reboot/crash):
-
-```bash
-docker compose up -d
-docker compose logs -f
 ```
 
 ### Launch with secrets typed in
@@ -165,7 +257,9 @@ Notes:
   docker compose run --rm ondemandportforward encrypt
   ```
 
-Equivalent plain `docker run`:
+### Plain docker run
+
+Equivalent to the compose setup:
 
 ```bash
 docker run -d --name ondemandportforward \
@@ -174,6 +268,14 @@ docker run -d --name ondemandportforward \
   --env-file .env \
   -v "$(pwd)/data:/data" \
   ondemandportforward:latest
+```
+
+### Building the image
+
+```bash
+docker build -t ondemandportforward:latest .
+# or via compose:
+docker compose build
 ```
 
 ## State and logs
@@ -206,80 +308,6 @@ skip the guesswork: point the forward at the daemon host's LAN IP directly —
 
 Tunnel up but connections close instantly? The forward's target host:port
 refused the connection — usually no sshd on the target or wrong address.
-
-## Sending a command letter
-
-### Encrypted (normal way)
-
-Interactive helper builds and encrypts the letter for you:
-
-```bash
-docker compose run --rm ondemandportforward encrypt
-```
-
-Manual, on any machine with gpg (symmetric, passphrase = `SECRET`):
-
-```bash
-cat > body.txt <<EOF
-host: 203.0.113.10
-user: root
-password: hunter2
-forwards: 2222:22
-ttl: 1800
-EOF
-gpg -a -c --cipher-algo AES256 body.txt   # writes body.txt.asc
-# no real host networking, or the target is another machine?
-# edit body.txt first, e.g. "forwards: 2222:192.168.1.124:22", and re-encrypt
-```
-
-#### How to send it
-
-Yes — just paste the ciphertext into the message body. The email must look
-like this:
-
-| Part | Requirement |
-|---|---|
-| From | anything — sender is not checked; the letter itself (SECRET / one-time code) is the authentication |
-| To | your own address (the letter must land in the watched mailbox) |
-| Subject | ignored (but replies from the daemon are prefixed `[ondemandportforward]` and never re-processed) |
-| Body | the full `-----BEGIN PGP MESSAGE-----` ... `-----END PGP MESSAGE-----` block from `body.txt.asc` |
-
-- All status replies (success and failure) always go to `IMAP_USER`, no
-  matter who sent the letter — a random sender gets no feedback.
-
-- The letter must land in one of the watched mailboxes (`IMAP_MAILBOX`,
-  default `INBOX`). Providers that auto-sort self-sent mail into a subfolder
-  (e.g. mail.ru → `INBOX/ToMyself`) will hide it from the daemon — add that
-  folder to `IMAP_MAILBOX` (see Configure).
-
-- Paste the block as **plain text, not HTML** (switch your mail client to
-  plain-text composing; HTML mode can mangle the base64 with soft line breaks
-  or NBSP and decryption fails).
-- Text before or after the block is ignored — the first PGP block in the body
-  wins.
-- No `code:` line in this mode; that field is plaintext-fallback only.
-
-Rules to remember:
-
-- **Symmetric** encryption with the `SECRET` passphrase — not public-key.
-- Every ciphertext is **single-use**: the replay cache burns the block on the
-  first attempt, even a failed one (e.g. wrong `SECRET`, corrupted paste).
-  Never resend the same block — re-encrypt; a fresh encryption of the same
-  plaintext is new ciphertext and works.
-
-### Plaintext fallback (one-time code)
-
-Arm a code first (hidden prompt; old codes die, `--clear` disables the mode):
-
-```bash
-docker compose run --rm ondemandportforward set-code
-```
-
-Then email a plain `key: value` body plus `code: <the-code>`. The code burns
-at acceptance — even a typo burns it; arm a new one to retry. A `code already
-used` reply is also the tamper alarm: something reused your code before you did.
-Rotate the remote machine's password after using this mode (the letter was
-readable to the mail provider).
 
 ## Inspecting
 
