@@ -82,6 +82,23 @@ ssh -J <letter-user>@<letter-host> -p 2222 <your-user-on-daemon-machine>@localho
 
 (`your-user` is an account on the daemon machine — not the letter's ssh user.)
 
+Need another host:port in the daemon machine's local network while connected?
+Add a local forward (`-L`) to the connect command — the target is dialed from
+the daemon machine, same rule as `forwards:`:
+
+```bash
+ssh -J <letter-user>@<letter-host> -p 2222 \
+    -L 8080:192.168.1.50:8080 \
+    <your-user-on-daemon-machine>@localhost
+```
+
+Now `localhost:8080` on your machine leads to `192.168.1.50:8080` in the
+daemon machine's network (e.g. `curl http://localhost:8080`).
+
+Session already open? Press `Enter` then `~C` to get the `ssh>` prompt and
+type `-L 8080:192.168.1.50:8080` — the forward attaches to the running
+connection, no reconnect needed.
+
 ## How it works
 
 1. Daemon polls the mailbox(es) (IMAP IDLE, poll fallback).
