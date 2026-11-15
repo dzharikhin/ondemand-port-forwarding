@@ -19,16 +19,17 @@ def _store_for_tools() -> Store:
 
 def cmd_encrypt(args: argparse.Namespace) -> int:
     from . import gpg
-    from .parser import parse_command
+    from .parser import DEFAULT_FORWARDS, parse_command
 
+    default_forwards = os.environ.get("FORWARDS_DEFAULT", "").strip() or DEFAULT_FORWARDS
     print("Compose the command letter (Enter accepts [defaults]):")
     host = input("Host: ").strip()
     port = input("SSH port [22]: ").strip() or "22"
     user = input("SSH user: ").strip()
     password = getpass.getpass("SSH password: ")
     forwards = (
-        input("Forwards remote:local or remote:host:local [2222:22]: ").strip()
-        or "2222:22"
+        input(f"Forwards remote:local or remote:host:local [{default_forwards}]: ").strip()
+        or default_forwards
     )
     ttl = input("TTL seconds [1800]: ").strip() or "1800"
 

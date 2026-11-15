@@ -8,6 +8,7 @@ LINE_RE = re.compile(r"^\s*([A-Za-z_]+)\s*:\s*(.*?)\s*$")
 MIN_TTL = 60
 MAX_TTL = 86400
 MAX_FORWARDS = 8
+DEFAULT_FORWARDS = "2222:22"
 
 
 class ParseError(Exception):
@@ -73,7 +74,11 @@ def _parse_forwards(value: str) -> list[tuple[int, str, int]]:
     return result
 
 
-def parse_command(body: str, ttl_default: int = 1800) -> Command:
+def parse_command(
+    body: str,
+    ttl_default: int = 1800,
+    forwards_default: str = DEFAULT_FORWARDS,
+) -> Command:
     fields: dict[str, str] = {}
     for line in body.splitlines():
         m = LINE_RE.match(line)
@@ -102,7 +107,7 @@ def parse_command(body: str, ttl_default: int = 1800) -> Command:
     forwards = (
         _parse_forwards(fields["forwards"])
         if fields.get("forwards")
-        else [(2222, "localhost", 22)]
+        else _parse_forwards(forwards_default)
     )
 
     ttl = ttl_default

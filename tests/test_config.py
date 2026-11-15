@@ -18,6 +18,7 @@ def test_defaults():
     assert cfg.smtp_password == "p"
     assert cfg.mail_from == "me@example.com"
     assert cfg.ttl_default == 1800 and cfg.retries == 3
+    assert cfg.forwards_default == "2222:22"
     assert cfg.plaintext_code == ""
     assert cfg.data_dir == "./data"
     assert cfg.imap_mailboxes == ["INBOX"]
@@ -47,3 +48,19 @@ def test_bad_int():
     }
     with pytest.raises(ConfigError, match="TTL_DEFAULT"):
         Config.from_env(env)
+
+
+def test_forwards_default():
+    base = {
+        "IMAP_HOST": "i", "IMAP_USER": "u", "IMAP_PASSWORD": "p",
+        "SMTP_HOST": "s", "SECRET": "x",
+    }
+    cfg = Config.from_env({**base, "FORWARDS_DEFAULT": "2222:192.168.1.20:22"})
+    assert cfg.forwards_default == "2222:192.168.1.20:22"
+    cfg = Config.from_env({**base, "FORWARDS_DEFAULT": "2200:22, 8080:nas.lan:8080"})
+    assert cfg.forwards_default == "2200:22, 8080:nas.lan:8080"
+    cfg = Config.from_env({**base, "FORWARDS_DEFAULT": "  "})
+    assert cfg.forwards_default == "2222:22"  # blank falls back
+    for bad in ("22", "a:b", "1:2:3:4", "2222:bad host:22"):
+        with pytest.raises(ConfigError, match="FORWARDS_DEFAULT"):
+            Config.from_env({**base, "FORWARDS_DEFAULT": bad})

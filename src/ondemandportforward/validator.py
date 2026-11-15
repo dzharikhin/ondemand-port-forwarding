@@ -61,7 +61,7 @@ class Validator:
 
         self.store.replay_add(body_hash)
         try:
-            command = parse_command(plaintext, self.cfg.ttl_default)
+            command = parse_command(plaintext, self.cfg.ttl_default, self.cfg.forwards_default)
         except ParseError as e:
             return _reject(MODE_ENCRYPTED, f"parse_error: {e}")
         return Verdict(accepted=True, mode=MODE_ENCRYPTED, reason="ok", command=command)
@@ -70,7 +70,7 @@ class Validator:
         armed = self.store.armed_code_hash()
 
         try:
-            command = parse_command(body_text, self.cfg.ttl_default)
+            command = parse_command(body_text, self.cfg.ttl_default, self.cfg.forwards_default)
         except ParseError as e:
             return (
                 _reject(MODE_PLAINTEXT, "plaintext_disabled")

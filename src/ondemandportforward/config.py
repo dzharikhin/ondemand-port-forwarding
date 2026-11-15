@@ -3,6 +3,8 @@ from __future__ import annotations
 import os
 from dataclasses import dataclass, field
 
+from .parser import DEFAULT_FORWARDS, ParseError, _parse_forwards
+
 
 class ConfigError(Exception):
     pass
@@ -26,6 +28,7 @@ class Config:
 
     plaintext_code: str = ""
     ttl_default: int = 1800
+    forwards_default: str = DEFAULT_FORWARDS
     retries: int = 3
     log_retention_days: int = 90
     strict_headers: bool = False
@@ -66,6 +69,14 @@ class Config:
                     boxes.append(chunk)
             return boxes or ["INBOX"]
 
+        def opt_forwards(name: str) -> str:
+            v = e.get(name, "").strip() or DEFAULT_FORWARDS
+            try:
+                _parse_forwards(v)
+            except ParseError as exc:
+                raise ConfigError(f"env {name}: {exc}") from None
+            return v
+
         return cls(
             imap_host=req("IMAP_HOST"),
             imap_user=req("IMAP_USER"),
@@ -81,6 +92,7 @@ class Config:
             mail_from=e.get("MAIL_FROM", "").strip(),
             plaintext_code=e.get("PLAINTEXT_CODE", ""),
             ttl_default=opt_int("TTL_DEFAULT", 1800),
+            forwards_default=opt_forwards("FORWARDS_DEFAULT"),
             retries=opt_int("RETRIES", 3),
             log_retention_days=opt_int("LOG_RETENTION_DAYS", 90),
             strict_headers=opt_bool("STRICT_HEADERS"),

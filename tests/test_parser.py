@@ -77,6 +77,22 @@ def test_forwards_with_host():
         parse_command("host: h\nuser: u\npassword: p\nforwards: 2222:bad host:22\n")
 
 
+def test_forwards_default_override():
+    body = "host: h\nuser: u\npassword: p\n"
+    cmd = parse_command(body, forwards_default="2222:192.168.1.20:22")
+    assert cmd.forwards == [(2222, "192.168.1.20", 22)]
+    cmd = parse_command(body, forwards_default="2200:22, 8080:nas.lan:8080")
+    assert cmd.forwards == [(2200, "localhost", 22), (8080, "nas.lan", 8080)]
+    # an explicit letter field always wins over the configured default
+    cmd = parse_command(
+        "host: h\nuser: u\npassword: p\nforwards: 3333:80\n",
+        forwards_default="2222:192.168.1.20:22",
+    )
+    assert cmd.forwards == [(3333, "localhost", 80)]
+    with pytest.raises(ParseError, match="forward"):
+        parse_command(body, forwards_default="1:2:3:4")
+
+
 def test_duplicate_remote_ports_rejected():
     with pytest.raises(ParseError, match="duplicate"):
         parse_command("host: h\nuser: u\npassword: p\nforwards: 2200:22, 2200:80\n")

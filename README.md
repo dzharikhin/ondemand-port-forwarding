@@ -62,7 +62,8 @@ block as **plain text** to your own address — full rules in
 
 ### 4. Connect
 
-With the default forward `2222:22`, once the tunnel is up, port `2222` on the
+With the default forward `2222:22` (or whatever you set in
+`FORWARDS_DEFAULT`), once the tunnel is up, port `2222` on the
 letter's `host` (the mediator) leads back to the sshd of the machine the
 daemon runs on (or to whatever `host:port` you named in `forwards:` — the
 connect commands stay the same). Two ways in:
@@ -120,8 +121,8 @@ connection, no reconnect needed.
 | `user` | yes | — | ssh login on the remote machine |
 | `password` | yes | — | ssh password (masked in all logs/replies) |
 | `port` | no | `22` | sshd port on the remote machine |
-| `forwards` | no | `2222:22` | comma list `remote:local` or `remote:host:local`; host defaults to `localhost` (as seen from the daemon) |
-| `ttl` | no | `1800` | seconds, 60..86400 |
+| `forwards` | no | `FORWARDS_DEFAULT` env, else `2222:22` | comma list `remote:local` or `remote:host:local`; host defaults to `localhost` (as seen from the daemon) |
+| `ttl` | no | `TTL_DEFAULT` env, else `1800` | seconds, 60..86400 |
 | `code` | plaintext mode | — | current one-time code |
 
 ### Forward targets
@@ -145,7 +146,9 @@ on the right (`2222:nas.lan:22`). IPv6 literals are not supported in the
 target position (colons conflict with the syntax).
 
 See [State and logs](#state-and-logs) for the podman-compose host-networking
-caveat that makes the `host:port` form the safe default.
+caveat that makes the `host:port` form the safe default — set it once via
+`FORWARDS_DEFAULT=2222:<lan-ip>:22` and letters without a `forwards:` line
+use it automatically.
 
 ### Email format
 
@@ -215,6 +218,7 @@ readable to the mail provider).
 | `MAIL_FROM` | `SMTP_USER` | From address on replies |
 | `PLAINTEXT_CODE` | — | initial one-time code (only applies if none armed yet; prefer `set-code`) |
 | `TTL_DEFAULT` | `1800` | default tunnel TTL, seconds |
+| `FORWARDS_DEFAULT` | `2222:22` | default `forwards:` for letters that omit the field (same syntax, e.g. `2222:192.168.1.20:22`) |
 | `RETRIES` | `3` | extra ssh connect attempts after the first |
 | `LOG_RETENTION_DAYS` | `90` | days to keep the state logs |
 | `STRICT_HEADERS` | `0` | `1` = require spf/dkim pass |
