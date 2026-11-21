@@ -15,12 +15,12 @@ class Config:
     imap_host: str
     imap_user: str
     imap_password: str
-    smtp_host: str
     secret: str
 
     imap_port: int = 993
     imap_tls: bool = True
     imap_mailboxes: list[str] = field(default_factory=lambda: ["INBOX"])
+    smtp_host: str = ""  # empty = SMTP disabled, replies go to the daemon log
     smtp_port: int = 465
     smtp_user: str = ""
     smtp_password: str = ""
@@ -81,7 +81,7 @@ class Config:
             imap_host=req("IMAP_HOST"),
             imap_user=req("IMAP_USER"),
             imap_password=req("IMAP_PASSWORD"),
-            smtp_host=req("SMTP_HOST"),
+            smtp_host=e.get("SMTP_HOST", "").strip(),
             secret=req("SECRET"),
             imap_port=opt_int("IMAP_PORT", 993),
             imap_tls=not opt_bool("IMAP_TLS_OFF"),

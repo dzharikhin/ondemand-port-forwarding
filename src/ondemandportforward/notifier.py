@@ -16,6 +16,10 @@ class Notifier:
         self.cfg = cfg
 
     async def _send(self, to: str, subject: str, body: str) -> None:
+        if not self.cfg.smtp_host:
+            # SMTP disabled: the daemon log is the feedback channel.
+            log.info("reply (smtp disabled) to %s: %s\n%s", to, subject, body)
+            return
         msg = email.message.EmailMessage()
         msg["From"] = self.cfg.mail_from
         msg["To"] = to
@@ -62,3 +66,11 @@ class Notifier:
                 "Set a new one: docker compose run --rm ondemandportforward set-code"
             )
         await self._send(to, "[ondemandportforward] FAILED", body)
+
+    async def send_stopped(self, to: str, stopped_ids: list[str]) -> None:
+        ids = ", ".join(stopped_ids)
+        body = (
+            f"Stopped {len(stopped_ids)} session(s): {ids}\n\n"
+            "The tunnel(s) are closed; the forwards on the mediator are gone."
+        )
+        await self._send(to, f"[ondemandportforward] tunnel STOPPED ({ids})", body)

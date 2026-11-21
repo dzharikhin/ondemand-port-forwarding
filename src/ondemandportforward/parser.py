@@ -9,6 +9,7 @@ MIN_TTL = 60
 MAX_TTL = 86400
 MAX_FORWARDS = 8
 DEFAULT_FORWARDS = "2222:22"
+STOP_RE = re.compile(r"^(all|[0-9a-f]{8})$")
 
 
 class ParseError(Exception):
@@ -17,15 +18,16 @@ class ParseError(Exception):
 
 @dataclass
 class Command:
-    host: str
-    ssh_user: str
-    ssh_password: str
+    host: str = ""
+    ssh_user: str = ""
+    ssh_password: str = ""
     port: int = 22
     forwards: list[tuple[int, str, int]] = field(
         default_factory=lambda: [(2222, "localhost", 22)]
     )
     ttl: int = 1800
     code: str = ""
+    stop: str = ""  # session id or "all" (control letter)
 
 
 def _parse_port(value: str, what: str) -> int:
@@ -87,6 +89,14 @@ def parse_command(
         key = m.group(1).lower()
         if key not in fields:
             fields[key] = m.group(2)
+
+    # Control letters: a stop action needs neither host nor credentials.
+    stop_raw = fields.get("stop")
+    if stop_raw is not None:
+        stop = stop_raw.lower()
+        if not STOP_RE.match(stop):
+            raise ParseError(f"bad stop target {stop!r}, expected 8-hex session id or 'all'")
+        return Command(stop=stop, code=fields.get("code", ""))
 
     host = fields.get("host", "")
     if not host:

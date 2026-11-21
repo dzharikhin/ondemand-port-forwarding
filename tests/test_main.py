@@ -5,7 +5,7 @@ import pytest
 
 from ondemandportforward import gpg
 from ondemandportforward.main import make_handler
-from ondemandportforward.sessions import SessionManager
+from ondemandportforward.sessions import STATUS_STOPPED, SessionManager
 from ondemandportforward.store import Store
 from ondemandportforward.validator import Validator
 
@@ -22,6 +22,9 @@ class FakeNotifier:
 
     async def send_failure(self, to, reason, log_tail=""):
         self.sent.append(("failure", to, reason))
+
+    async def send_stopped(self, to, stopped_ids):
+        self.sent.append(("stopped", to, tuple(stopped_ids)))
 
 
 @pytest.fixture
@@ -96,4 +99,45 @@ async def test_plaintext_code_burn_across_handler(cfg, harness):
     await handler("8", make_email("user@example.com", body))
     assert notifier.sent[1][0] == "failure"
     assert notifier.sent[1][2] == "code_used"
+    await manager.shutdown()
+
+
+async def _open_session(handler, notifier, uid="10"):
+    body = gpg.encrypt("host: 1.2.3.4\nuser: root\npassword: pw\nttl: 600\n", SECRET)
+    await handler(uid, make_email("user@example.com", body))
+    assert notifier.sent[0][0] == "success"
+    return notifier.sent[0][2]  # session id
+
+
+async def test_stop_letter_ends_session(cfg, harness):
+    handler, store, manager, notifier = harness
+    session_id = await _open_session(handler, notifier)
+
+    stop = gpg.encrypt(f"stop: {session_id}\n", SECRET)
+    await handler("11", make_email("user@example.com", stop))
+
+    assert notifier.sent[-1][0] == "stopped"
+    assert notifier.sent[-1][2] == (session_id,)
+    assert manager.sessions[session_id].status == STATUS_STOPPED
+    await manager.shutdown()
+
+
+async def test_stop_unknown_id_replies_failure(cfg, harness):
+    handler, store, manager, notifier = harness
+    stop = gpg.encrypt("stop: deadbeef\n", SECRET)
+    await handler("12", make_email("user@example.com", stop))
+
+    assert notifier.sent[-1][0] == "failure"
+    assert "deadbeef" in notifier.sent[-1][2]
+    await manager.shutdown()
+
+
+async def test_plaintext_stop_letter_burns_code(cfg, harness):
+    handler, store, manager, notifier = harness
+    store.arm_code("abc123")
+    await handler("7", make_email("user@example.com", "stop: all\ncode: abc123\n"))
+
+    assert notifier.sent[0][0] == "failure"  # nothing to stop, but processed
+    assert "no active" in notifier.sent[0][2]
+    assert store.armed_code_hash() is None  # code burned
     await manager.shutdown()

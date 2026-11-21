@@ -21,7 +21,6 @@ Required (everything else has defaults):
 IMAP_HOST=imap.example.com
 IMAP_USER=user@example.com
 IMAP_PASSWORD=...
-SMTP_HOST=smtp.example.com
 SECRET=long-random-passphrase   # gpg passphrase for command letters
 ```
 
@@ -100,6 +99,20 @@ Session already open? Press `Enter` then `~C` to get the `ssh>` prompt and
 type `-L 8080:192.168.1.50:8080` — the forward attaches to the running
 connection, no reconnect needed.
 
+### 5. Stop a session early
+
+A letter with a `stop:` line closes tunnels before their TTL. Encrypted like
+any letter (plaintext mode: add the `code:` line as usual):
+
+```bash
+printf 'stop: a1b2c3d4\n' > body.txt   # the session id from the UP reply
+# or: stop: all
+gpg -a -c --cipher-algo AES256 body.txt # email body.txt.asc as usual
+```
+
+An unknown or already-ended id is not an error: nothing stops and the reply
+says so.
+
 ## How it works
 
 1. Daemon polls the mailbox(es) (IMAP IDLE, poll fallback).
@@ -109,9 +122,12 @@ connection, no reconnect needed.
    - **Plaintext** (emergency fallback, when gpg is unavailable): plain
      `key: value` body plus a one-time `code:` line. The code burns on first use.
 3. Authenticated letter -> tunnel `ssh -R <remote_port>:localhost:<local_port> user@remote`
-   opens for a limited TTL (default 30 min).
+   opens for a limited TTL (default 30 min). A letter with a `stop:` line is
+   a *control letter* instead: it closes active sessions early.
 4. Reply email: success (connect instructions) or failure (last log lines).
    Replies are prefixed `[ondemandportforward]` and never re-processed.
+   With SMTP disabled (`SMTP_HOST` empty) the letters still work — the reply
+   text goes to the daemon log (`docker compose logs`) instead of email.
 
 ### Letter body fields
 
@@ -123,6 +139,7 @@ connection, no reconnect needed.
 | `port` | no | `22` | sshd port on the remote machine |
 | `forwards` | no | `FORWARDS_DEFAULT` env, else `2222:22` | comma list `remote:local` or `remote:host:local`; host defaults to `localhost` (as seen from the daemon) |
 | `ttl` | no | `TTL_DEFAULT` env, else `1800` | seconds, 60..86400 |
+| `stop` | no | — | 8-hex session id or `all`: close that session now (host/user/password not needed) |
 | `code` | plaintext mode | — | current one-time code |
 
 ### Forward targets
@@ -207,7 +224,7 @@ readable to the mail provider).
 | `IMAP_HOST` | — required | IMAP server of the watched mailbox |
 | `IMAP_USER` | — required | mailbox login; replies always go to this address |
 | `IMAP_PASSWORD` | — required | IMAP password |
-| `SMTP_HOST` | — required | SMTP server for replies |
+| `SMTP_HOST` | unset | SMTP server for replies. **Empty/unset = SMTP disabled**: letters are still processed, replies go only to the daemon log |
 | `SECRET` | — required | gpg passphrase for command letters |
 | `IMAP_PORT` | `993` | IMAP port |
 | `IMAP_TLS_OFF` | unset | set `1` to disable IMAP TLS |
@@ -308,7 +325,7 @@ files, readable outside the container:
 imap.json      # mailbox watermark (last_uid + uidvalidity)
 replay.json    # replay cache of processed ciphertexts
 code.json      # one-time password usage state (armed + burned codes)
-sessions.jsonl # session lifecycle log (start/up/retry/ttl_kill/exit/fail)
+sessions.jsonl # session lifecycle log (start/up/retry/ttl_kill/manual_stop/exit/fail)
 attempts.jsonl # audit of every email attempt (accept/reject/ignore + reason)
 ```
 

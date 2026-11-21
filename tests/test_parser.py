@@ -112,3 +112,23 @@ def test_bad_host():
         parse_command("host: bad host\nuser: u\npassword: p\n")
     with pytest.raises(ParseError, match="host"):
         parse_command("host: 1.2.3.4/24\nuser: u\npassword: p\n")
+
+
+def test_stop_letter():
+    cmd = parse_command("stop: a1b2c3d4\n")
+    assert cmd.stop == "a1b2c3d4"
+    cmd = parse_command("stop: ALL\n")
+    assert cmd.stop == "all"
+    # host/user/password not required on a control letter
+    assert parse_command("stop: all\n").host == ""
+    # a code line is carried through for the plaintext mode
+    assert parse_command("stop: all\ncode: abc123\n").code == "abc123"
+
+
+def test_bad_stop_target():
+    with pytest.raises(ParseError, match="stop"):
+        parse_command("stop: deadbeef!\n")
+    with pytest.raises(ParseError, match="stop"):
+        parse_command("stop: a1b2c3d\n")  # 7 chars
+    with pytest.raises(ParseError, match="stop"):
+        parse_command("stop: \n")

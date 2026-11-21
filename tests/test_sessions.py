@@ -8,6 +8,7 @@ from ondemandportforward.sessions import (
     STATUS_DIED,
     STATUS_EXPIRED,
     STATUS_FAILED,
+    STATUS_STOPPED,
     STATUS_UP,
     SessionManager,
 )
@@ -76,3 +77,49 @@ async def test_shutdown_kills_sessions(cfg, store):
     await asyncio.wait_for(session.established.wait(), timeout=cfg.connect_grace + 5)
     await manager.shutdown()
     assert session._task.done()
+
+
+async def test_stop_session_before_ttl(cfg, store):
+    spawns = {"n": 0}
+
+    def factory(cmd):
+        spawns["n"] += 1
+        return (ALIVE, {"SSHPASS": cmd.ssh_password})
+
+    manager = SessionManager(cfg, store, command_factory=factory)
+    session = manager.start(make_cmd(ttl=600))
+    await asyncio.wait_for(session.established.wait(), timeout=cfg.connect_grace + 5)
+    assert session.status == STATUS_UP
+
+    stopped = await manager.stop_session(session.id)
+    assert stopped is session
+    assert session.status == STATUS_STOPPED
+    assert session._task.done()
+    assert session._proc.returncode is not None
+    assert spawns["n"] == 1  # cancelled first: no retry respawn
+
+    events = [e["event"] for e in store.session_events(session.id)]
+    assert "stopped:manual" in events
+
+
+async def test_stop_session_unknown_or_ended(cfg, store):
+    manager = make_manager(cfg, store, ALIVE)
+    assert await manager.stop_session("deadbeef") is None
+
+    session = manager.start(make_cmd(ttl=1))
+    await asyncio.wait_for(session._task, timeout=10)  # expires on its own
+    assert session.status == STATUS_EXPIRED
+    assert await manager.stop_session(session.id) is None
+
+
+async def test_stop_all(cfg, store):
+    manager = make_manager(cfg, store, ALIVE)
+    first = manager.start(make_cmd(ttl=600))
+    second = manager.start(make_cmd(ttl=600))
+    await asyncio.wait_for(first.established.wait(), timeout=cfg.connect_grace + 5)
+    await asyncio.wait_for(second.established.wait(), timeout=cfg.connect_grace + 5)
+
+    stopped = await manager.stop_all()
+    assert {s.id for s in stopped} == {first.id, second.id}
+    assert first.status == STATUS_STOPPED and second.status == STATUS_STOPPED
+    assert first._task.done() and second._task.done()

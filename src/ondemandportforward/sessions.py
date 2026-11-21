@@ -19,6 +19,7 @@ log = logging.getLogger("ondemandportforward.sessions")
 STATUS_STARTING = "starting"
 STATUS_UP = "up"
 STATUS_EXPIRED = "expired"
+STATUS_STOPPED = "stopped"
 STATUS_FAILED = "failed"
 STATUS_DIED = "died"
 
@@ -191,6 +192,39 @@ class SessionManager:
             tail = "\n".join(list(session.log)[-ERROR_LOG_LINES:])
             self.store.add_session_event(session.id, "failed", tail)
             log.error("session %s failed to establish", session.id)
+
+    async def stop_session(self, session_id: str) -> Session | None:
+        """Stop a session before its TTL; None if unknown or already ended.
+
+        The supervisor task is cancelled *before* terminating the process,
+        otherwise _run treats the kill as a died-after-established failure
+        and respawns ssh up to RETRIES times.
+        """
+        session = self.sessions.get(session_id)
+        if session is None or session._task is None or session._task.done():
+            return None
+        session._task.cancel()
+        try:
+            await session._task
+        except (asyncio.CancelledError, Exception):  # noqa: BLE001
+            pass
+        proc = session._proc
+        if proc is not None and proc.returncode is None:
+            await self._stop(proc, session, STATUS_STOPPED, "manual")  # logs stopped:manual
+        else:
+            session.status = STATUS_STOPPED
+            self.store.add_session_event(session.id, "stopped:manual")
+        self.store.update_session(session.id, STATUS_STOPPED)
+        log.info("session %s stopped manually", session.id)
+        return session
+
+    async def stop_all(self) -> list[Session]:
+        stopped: list[Session] = []
+        for session_id in list(self.sessions):
+            session = await self.stop_session(session_id)
+            if session is not None:
+                stopped.append(session)
+        return stopped
 
     async def _pump_stderr(self, proc: asyncio.subprocess.Process, session: Session) -> None:
         assert proc.stderr is not None

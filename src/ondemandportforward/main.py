@@ -58,7 +58,34 @@ def make_handler(
                 log.exception("failed to send rejection reply")
             return
 
-        session = manager.start(verdict.command)
+        cmd = verdict.command
+
+        if cmd.stop:
+            log.info("UID %s control letter: stop=%r", uid, cmd.stop)
+            store.log_attempt(
+                imap_uid=uid,
+                sender=sender_addr,
+                mode=verdict.mode,
+                outcome="accepted",
+                session_id=cmd.stop if cmd.stop != "all" else None,
+            )
+            try:
+                if cmd.stop == "all":
+                    stopped = await manager.stop_all()
+                else:
+                    target = await manager.stop_session(cmd.stop)
+                    stopped = [target] if target is not None else []
+                if stopped:
+                    await notifier.send_stopped(to, [s.id for s in stopped])
+                elif cmd.stop == "all":
+                    await notifier.send_failure(to, "no active sessions to stop")
+                else:
+                    await notifier.send_failure(to, f"no active session {cmd.stop!r}")
+            except Exception:  # noqa: BLE001
+                log.exception("failed to handle control letter for UID %s", uid)
+            return
+
+        session = manager.start(cmd)
         log.info("UID %s accepted -> session %s", uid, session.id)
         store.log_attempt(
             imap_uid=uid, sender=sender_addr, mode=verdict.mode,

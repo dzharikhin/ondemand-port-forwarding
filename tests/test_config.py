@@ -6,6 +6,16 @@ from ondemandportforward.config import Config, ConfigError
 def test_missing_required():
     with pytest.raises(ConfigError, match="IMAP_HOST"):
         Config.from_env({})
+    with pytest.raises(ConfigError, match="SECRET"):
+        Config.from_env({"IMAP_HOST": "i", "IMAP_USER": "u", "IMAP_PASSWORD": "p"})
+
+
+def test_smtp_optional():
+    cfg = Config.from_env({
+        "IMAP_HOST": "i", "IMAP_USER": "me@example.com", "IMAP_PASSWORD": "p",
+        "SECRET": "x",
+    })
+    assert cfg.smtp_host == ""
 
 
 def test_defaults():
